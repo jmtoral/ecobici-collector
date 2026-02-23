@@ -61,6 +61,10 @@ def load_data() -> pd.DataFrame:
     df["hour"]         = df["collected_at"].dt.hour
     df["dow"]          = df["collected_at"].dt.dayofweek
     df["disponible"]   = (df["bikes_available"] >= 1).astype(int)
+
+    # Filtrar horario fuera de operación EcoBici: 00:30–05:00 CDMX
+    minutes = df["hour"] * 60 + df["collected_at"].dt.minute
+    df = df[~((minutes >= 30) & (minutes < 300))].copy()
     return df
 
 

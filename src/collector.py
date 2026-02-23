@@ -16,6 +16,14 @@ import requests
 import psycopg2
 import psycopg2.extras
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+
+CDMX = ZoneInfo("America/Mexico_City")
+
+# Horario operativo EcoBici: 05:00 – 00:30 CDMX
+# Fuera de ese rango (00:30 – 04:59) no hay bicis en circulación
+OPEN_FROM_MIN = 5 * 60       # 05:00 → 300 min desde medianoche
+CLOSE_AT_MIN  = 0 * 60 + 30  # 00:30 → 30 min desde medianoche
 
 logging.basicConfig(
     level=logging.INFO,
@@ -117,8 +125,23 @@ def insert_snapshots(cur, stations: list[dict], collected_at: datetime) -> int:
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+def in_operating_hours(ts: datetime) -> bool:
+    """Devuelve True si el timestamp está dentro del horario operativo (05:00–00:30 CDMX)."""
+    local = ts.astimezone(CDMX)
+    minutes = local.hour * 60 + local.minute
+    # Cerrado: 00:30 (30 min) hasta 05:00 (300 min), exclusive
+    return not (CLOSE_AT_MIN <= minutes < OPEN_FROM_MIN)
+
+
 def collect():
     log.info("Iniciando recolección de snapshots EcoBici...")
+
+    # 0. Verificar horario operativo antes de llamar al API
+    now_utc = datetime.now(tz=timezone.utc)
+    if not in_operating_hours(now_utc):
+        now_cdmx = now_utc.astimezone(CDMX)
+        log.info("Fuera de horario operativo (%s CDMX, 00:30–05:00). Sin recolección.", now_cdmx.strftime("%H:%M"))
+        sys.exit(0)
 
     # 1. Descargar status (siempre necesario)
     status_data = fetch_json(STATION_STATUS_URL)

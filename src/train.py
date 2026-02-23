@@ -42,6 +42,13 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     df["ts_local"]   = pd.to_datetime(df["collected_at"]).dt.tz_convert("America/Mexico_City")
     df["hour"]       = df["ts_local"].dt.hour
     df["dow"]        = df["ts_local"].dt.dayofweek
+
+    # Filtrar horario fuera de operación (00:30–05:00 CDMX)
+    # para no enseñarle al modelo que "no hay bicis" por cierre del sistema
+    minutes = df["hour"] * 60 + df["ts_local"].dt.minute
+    df = df[~((minutes >= 30) & (minutes < 300))].copy()
+    print(f"Registros en horario operativo (05:00–00:30): {len(df):,}")
+
     df["is_weekend"] = (df["dow"] >= 5).astype(int)
     df["hour_sin"]   = np.sin(2 * np.pi * df["hour"] / 24)
     df["hour_cos"]   = np.cos(2 * np.pi * df["hour"] / 24)
