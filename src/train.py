@@ -22,7 +22,7 @@ def load_data() -> pd.DataFrame:
     con = psycopg2.connect(DB_URL)
     df = pd.read_sql("""
         SELECT
-            s.timestamp,
+            s.collected_at,
             s.station_id,
             s.bikes_available,
             s.is_renting,
@@ -30,7 +30,7 @@ def load_data() -> pd.DataFrame:
         FROM snapshots s
         LEFT JOIN station_info si USING (station_id)
         WHERE s.is_installed = TRUE
-        ORDER BY s.timestamp
+        ORDER BY s.collected_at
     """, con)
     con.close()
     print(f"Registros cargados: {len(df):,}")
@@ -39,7 +39,7 @@ def load_data() -> pd.DataFrame:
 
 def build_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    df["ts_local"]   = pd.to_datetime(df["timestamp"]).dt.tz_convert("America/Mexico_City")
+    df["ts_local"]   = pd.to_datetime(df["collected_at"]).dt.tz_convert("America/Mexico_City")
     df["hour"]       = df["ts_local"].dt.hour
     df["dow"]        = df["ts_local"].dt.dayofweek
     df["is_weekend"] = (df["dow"] >= 5).astype(int)

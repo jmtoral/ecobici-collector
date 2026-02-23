@@ -1,10 +1,11 @@
-name: 🧠 Entrenar Modelo EcoBici
+name: Entrenar Modelo EcoBici
 
 on:
   schedule:
     # Cada domingo a las 3am UTC (9pm hora CDMX del sábado)
+    # Se reentrena semanalmente para incorporar datos nuevos
     - cron: "0 3 * * 0"
-  workflow_dispatch:  # Permite correr manualmente cuando quieras
+  workflow_dispatch:
 
 jobs:
   train:
@@ -22,12 +23,12 @@ jobs:
           cache: "pip"
 
       - name: Instalar dependencias
-        run: pip install psycopg2-binary pandas scikit-learn numpy
+        run: pip install -r requirements.txt
 
       - name: Entrenar modelo
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
-        run: python train.py
+        run: python src/train.py
 
       - name: Subir modelo como artifact
         uses: actions/upload-artifact@v4
@@ -36,14 +37,14 @@ jobs:
           path: ecobici_model.pkl
           retention-days: 90
 
-      - name: Tag de release con el modelo
+      - name: Crear release con el modelo entrenado
         uses: softprops/action-gh-release@v2
         with:
           tag_name: model-${{ github.run_number }}
-          name: "Modelo entrenado - ${{ github.run_number }}"
+          name: "Modelo v${{ github.run_number }} — ${{ github.run_id }}"
           files: ecobici_model.pkl
           body: |
-            Modelo entrenado automáticamente el ${{ github.run_number }}.
-            Ver logs del workflow para métricas (AUC-ROC, etc.)
+            Modelo reentrenado automáticamente el $(date -u +"%Y-%m-%d").
+            Ver logs del workflow para métricas (AUC-ROC, classification report).
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
