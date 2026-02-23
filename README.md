@@ -9,12 +9,14 @@ Pipeline automatizado para recolectar datos de disponibilidad de bicicletas en *
 1. [¿Qué hace este proyecto?](#qué-hace-este-proyecto)
 2. [Arquitectura](#arquitectura)
 3. [Estructura del proyecto](#estructura-del-proyecto)
-4. [¿Por qué Supabase?](#por-qué-supabase)
-5. [¿Por qué 15 minutos?](#por-qué-15-minutos)
-6. [El modelo](#el-modelo)
-7. [Setup paso a paso](#setup-paso-a-paso)
-8. [Uso del CLI de predicción](#uso-del-cli-de-predicción)
-9. [Dependencias](#dependencias)
+4. [Workflows y cron](#workflows-y-cron)
+5. [¿Por qué Supabase?](#por-qué-supabase)
+6. [¿Por qué 15 minutos?](#por-qué-15-minutos)
+7. [Costos y límites gratuitos](#costos-y-límites-gratuitos)
+8. [El modelo](#el-modelo)
+9. [Setup paso a paso](#setup-paso-a-paso)
+10. [Uso del CLI de predicción](#uso-del-cli-de-predicción)
+11. [Dependencias](#dependencias)
 
 ---
 
@@ -95,6 +97,102 @@ ecobici-collector/
 ├── .gitignore
 └── README.md
 ```
+
+---
+
+## Workflows y cron
+
+El proyecto tiene tres workflows de GitHub Actions. Ninguno requiere intervención manual una vez configurado.
+
+### `collect.yml` — Recolección de snapshots
+
+```
+┌─────────────────── cada 15 min ───────────────────────┐
+│                                                        │
+│   cron: "*/15 * * * *"   (UTC)                        │
+│                                                        │
+│   Horario operativo EcoBici: 05:00 – 00:30 CDMX       │
+│   Cierre del sistema:        00:30 – 05:00 CDMX       │
+│                                                        │
+│   El script detecta si está dentro del horario.       │
+│   Si no → sale sin llamar al API ni escribir en DB.   │
+└────────────────────────────────────────────────────────┘
+```
+
+| Expresión cron | Significado |
+|----------------|-------------|
+| `*/15` | Cada 15 minutos |
+| `*` (hora) | Todas las horas |
+| `*` (día) | Todos los días |
+| `*` (mes) | Todos los meses |
+| `*` (día semana) | Todos los días de la semana |
+
+> GitHub Actions ejecuta crons en UTC. La conversión a hora CDMX (UTC-6 en invierno, UTC-5 en verano) la hace el propio script Python, lo que garantiza que el horario de cierre se respeta correctamente aunque cambie el horario de verano.
+
+### `train.yml` — Entrenamiento semanal
+
+```
+cron: "0 3 * * 0"
+         │ │   └── domingo (0)
+         │ └────── 3am UTC = 9pm CDMX (sábado)
+         └──────── minuto 0
+```
+
+Se reentrena cada domingo de madrugada para incorporar todos los datos acumulados durante la semana. El modelo resultante se publica como GitHub Release con el archivo `.pkl`.
+
+### `keepalive.yml` — Ping a Supabase
+
+```
+cron: "0 12 */3 * *"
+         │  └── cada 3 días
+         └───── 12pm UTC = 6am CDMX
+```
+
+Supabase pausa automáticamente los proyectos gratuitos que no reciben actividad por 7 días. Este workflow hace una consulta mínima (`SELECT COUNT(*)`) cada 3 días para mantener la base de datos activa.
+
+---
+
+## Costos y límites gratuitos
+
+El proyecto está diseñado para correr **completamente gratis** usando los planes free de GitHub Actions y Supabase.
+
+### GitHub Actions — 2,000 min/mes incluidos (se renuevan el 1° de cada mes)
+
+| Workflow | Runs/mes | Min/run | Min/mes |
+|----------|----------|---------|---------|
+| `collect.yml` en horario operativo | ~2,340 | ~0.5 | ~1,170 |
+| `collect.yml` fuera de horario (salida rápida) | ~540 | ~0.05 | ~27 |
+| `train.yml` semanal | ~4 | ~5 | ~20 |
+| `keepalive.yml` cada 3 días | ~10 | ~0.3 | ~3 |
+| **Total estimado** | | | **~1,220** |
+| **Cuota gratuita** | | | **2,000** |
+| **Margen disponible** | | | **~780 (39%)** |
+
+> Si en algún mes se agotan los minutos, los workflows se pausan hasta el día 1 del siguiente mes. No hay cargo adicional.
+
+### Supabase — 500 MB de almacenamiento incluidos
+
+| Concepto | Valor |
+|----------|-------|
+| Estaciones activas | ~677 |
+| Snapshots por día (solo horario operativo) | ~2,600 |
+| Tamaño estimado por fila | ~100 bytes |
+| **Crecimiento mensual** | **~8 MB/mes** |
+| **Capacidad gratuita** | **500 MB** |
+| **Meses antes de llegar al límite** | **~60 meses** |
+
+> Nota: la estimación de 100 bytes por fila es conservadora. PostgreSQL con índices puede consumir más por overhead de página, pero el margen sigue siendo amplio.
+
+Cuando quieras liberar espacio manualmente:
+
+```sql
+-- Eliminar snapshots con más de 90 días
+DELETE FROM snapshots WHERE collected_at < NOW() - INTERVAL '90 days';
+```
+
+### Streamlit Community Cloud — gratuito sin límite de tiempo
+
+El dashboard no consume minutos de Actions ni almacenamiento de Supabase. Corre en los servidores de Streamlit y se redespliegua automáticamente con cada push a `main`.
 
 ---
 
