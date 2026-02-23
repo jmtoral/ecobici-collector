@@ -1,0 +1,30 @@
+name: 🚲 Recolectar Snapshots EcoBici
+
+on:
+  schedule:
+    # Cada 5 minutos (mínimo permitido por GitHub Actions)
+    - cron: "*/5 * * * *"
+  workflow_dispatch:  # También permite correrlo manualmente desde la UI
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Instalar dependencias
+        run: pip install psycopg2-binary requests
+
+      - name: Correr colector
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: python collector.py

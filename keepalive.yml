@@ -1,0 +1,36 @@
+name: 💓 Supabase Keepalive
+
+on:
+  schedule:
+    # Cada 3 días a las 12pm UTC
+    - cron: "0 12 */3 * *"
+  workflow_dispatch:
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Ping Supabase
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          pip install psycopg2-binary -q
+          python - <<'EOF'
+          import os, psycopg2
+          con = psycopg2.connect(os.environ["SUPABASE_DB_URL"])
+          cur = con.cursor()
+          cur.execute("SELECT COUNT(*) FROM snapshots")
+          count = cur.fetchone()[0]
+          print(f"💓 Keepalive OK — {count:,} snapshots en DB")
+          con.close()
+          EOF
