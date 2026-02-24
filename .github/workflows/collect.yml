@@ -28,4 +28,4 @@ jobs:
       - name: Recolectar snapshot
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
-        run: python src/collector.py
+        run: python src/main.py
