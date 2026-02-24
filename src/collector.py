@@ -96,10 +96,10 @@ def upsert_station_info(cur, stations: list[dict]) -> int:
 
 
 def insert_snapshots(cur, stations: list[dict], collected_at: datetime) -> int:
-    """Inserta un snapshot por estación en la tabla snapshots."""
     sql = """
         INSERT INTO snapshots
             (collected_at, station_id, bikes_available, docks_available,
+             bikes_disabled, docks_disabled,
              is_installed, is_renting, is_returning)
         VALUES %s
         ON CONFLICT DO NOTHING;
@@ -110,6 +110,8 @@ def insert_snapshots(cur, stations: list[dict], collected_at: datetime) -> int:
             str(s["station_id"]),
             s.get("num_bikes_available", 0),
             s.get("num_docks_available", 0),
+            s.get("num_bikes_disabled", 0),   # ← nuevo
+            s.get("num_docks_disabled", 0),   # ← nuevo
             bool(s.get("is_installed", 0)),
             bool(s.get("is_renting", 0)),
             bool(s.get("is_returning", 0)),
