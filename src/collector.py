@@ -1,7 +1,7 @@
 """
 EcoBici Snapshot Collector
 --------------------------
-Se ejecuta cada 15 minutos vía GitHub Actions.
+Se ejecuta cada 10 minutos vía Google Cloud Scheduler + Cloud Functions.
 Descarga el estado actual de todas las estaciones desde el API GBFS de EcoBici
 y persiste los datos en Supabase (PostgreSQL).
 
@@ -37,7 +37,7 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 DB_URL = os.environ["SUPABASE_DB_URL"]
 
-GBFS_BASE = "https://gbfs.mex.lyftbikes.com/gbfs/en"
+GBFS_BASE          = "https://gbfs.mex.lyftbikes.com/gbfs/en"
 STATION_STATUS_URL = f"{GBFS_BASE}/station_status.json"
 STATION_INFO_URL   = f"{GBFS_BASE}/station_information.json"
 
@@ -59,7 +59,7 @@ def fetch_json(url: str) -> dict:
             log.warning("Intento %d/%d fallido para %s: %s", attempt, MAX_RETRIES, url, exc)
             if attempt == MAX_RETRIES:
                 raise
-    return {}   # nunca se llega aquí, pero satisface a mypy
+    return {}
 
 
 # ---------------------------------------------------------------------------
@@ -68,7 +68,7 @@ def fetch_json(url: str) -> dict:
 def upsert_station_info(cur, stations: list[dict]) -> int:
     """
     Inserta o actualiza la información estática de cada estación.
-    Sólo escribe si cambian nombre o capacidad para no saturar la DB.
+    Solo escribe si cambian nombre o capacidad para no saturar la DB.
     """
     sql = """
         INSERT INTO station_info (station_id, name, capacity, lat, lon)
@@ -96,10 +96,11 @@ def upsert_station_info(cur, stations: list[dict]) -> int:
 
 
 def insert_snapshots(cur, stations: list[dict], collected_at: datetime) -> int:
+    """Inserta un snapshot por estación en la tabla snapshots."""
     sql = """
         INSERT INTO snapshots
-            (collected_at, station_id, bikes_available, docks_available,
-             bikes_disabled, docks_disabled,
+            (collected_at, station_id, bikes_available, bikes_disabled,
+             docks_available, docks_disabled,
              is_installed, is_renting, is_returning)
         VALUES %s
         ON CONFLICT DO NOTHING;
@@ -109,9 +110,9 @@ def insert_snapshots(cur, stations: list[dict], collected_at: datetime) -> int:
             collected_at,
             str(s["station_id"]),
             s.get("num_bikes_available", 0),
+            s.get("num_bikes_disabled", 0),
             s.get("num_docks_available", 0),
-            s.get("num_bikes_disabled", 0),   # ← nuevo
-            s.get("num_docks_disabled", 0),   # ← nuevo
+            s.get("num_docks_disabled", 0),
             bool(s.get("is_installed", 0)),
             bool(s.get("is_renting", 0)),
             bool(s.get("is_returning", 0)),
@@ -125,13 +126,12 @@ def insert_snapshots(cur, stations: list[dict], collected_at: datetime) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Main
+# Lógica principal
 # ---------------------------------------------------------------------------
 def in_operating_hours(ts: datetime) -> bool:
     """Devuelve True si el timestamp está dentro del horario operativo (05:00–00:30 CDMX)."""
     local = ts.astimezone(CDMX)
     minutes = local.hour * 60 + local.minute
-    # Cerrado: 00:30 (30 min) hasta 05:00 (300 min), exclusive
     return not (CLOSE_AT_MIN <= minutes < OPEN_FROM_MIN)
 
 
@@ -142,15 +142,18 @@ def collect():
     now_utc = datetime.now(tz=timezone.utc)
     if not in_operating_hours(now_utc):
         now_cdmx = now_utc.astimezone(CDMX)
-        log.info("Fuera de horario operativo (%s CDMX, 00:30–05:00). Sin recolección.", now_cdmx.strftime("%H:%M"))
-        sys.exit(0)
+        log.info(
+            "Fuera de horario operativo (%s CDMX, 00:30–05:00). Sin recolección.",
+            now_cdmx.strftime("%H:%M"),
+        )
+        return
 
-    # 1. Descargar status (siempre necesario)
-    status_data = fetch_json(STATION_STATUS_URL)
+    # 1. Descargar status
+    status_data     = fetch_json(STATION_STATUS_URL)
     status_stations = status_data.get("data", {}).get("stations", [])
     if not status_stations:
         log.error("No se recibieron estaciones del API de status. Abortando.")
-        sys.exit(1)
+        raise RuntimeError("API de status vacío")
 
     # Usar el timestamp del feed como instante de recolección
     last_updated = status_data.get("last_updated")
@@ -159,11 +162,15 @@ def collect():
         if last_updated
         else datetime.now(tz=timezone.utc)
     )
-    log.info("Feed timestamp: %s | Estaciones en status: %d", collected_at.isoformat(), len(status_stations))
+    log.info(
+        "Feed timestamp: %s | Estaciones en status: %d",
+        collected_at.isoformat(),
+        len(status_stations),
+    )
 
-    # 2. Descargar info estática (para mantener station_info actualizada)
+    # 2. Descargar info estática
     try:
-        info_data = fetch_json(STATION_INFO_URL)
+        info_data     = fetch_json(STATION_INFO_URL)
         info_stations = info_data.get("data", {}).get("stations", [])
     except requests.RequestException:
         log.warning("No se pudo obtener station_information.json — se omite upsert de info.")
@@ -174,18 +181,29 @@ def collect():
     try:
         with con:
             with con.cursor() as cur:
-                # Actualizar info estática de estaciones
                 if info_stations:
                     n_info = upsert_station_info(cur, info_stations)
                     log.info("station_info actualizada: %d estaciones", n_info)
 
-                # Insertar snapshots
                 n_snaps = insert_snapshots(cur, status_stations, collected_at)
                 log.info("Snapshots insertados: %d", n_snaps)
     finally:
         con.close()
 
-    log.info("Recoleccion completada exitosamente.")
+    log.info("Recolección completada exitosamente.")
+
+
+# ---------------------------------------------------------------------------
+# Entry points
+# ---------------------------------------------------------------------------
+def run_collector(request):
+    """Entry point para Google Cloud Functions (HTTP trigger)."""
+    try:
+        collect()
+        return "OK", 200
+    except Exception as exc:
+        log.error("Error en la recolección: %s", exc)
+        return f"ERROR: {exc}", 500
 
 
 if __name__ == "__main__":
