@@ -46,7 +46,9 @@ def load_data() -> pd.DataFrame:
             s.collected_at,
             s.station_id,
             s.bikes_available,
+            s.bikes_disabled,
             s.docks_available,
+            s.docks_disabled,
             s.is_renting,
             COALESCE(si.name, s.station_id) AS station_name,
             si.capacity
@@ -57,10 +59,12 @@ def load_data() -> pd.DataFrame:
     """, con)
     con.close()
 
-    df["collected_at"] = pd.to_datetime(df["collected_at"]).dt.tz_convert(CDMX)
-    df["hour"]         = df["collected_at"].dt.hour
-    df["dow"]          = df["collected_at"].dt.dayofweek
-    df["disponible"]   = (df["bikes_available"] >= 1).astype(int)
+    df["collected_at"]   = pd.to_datetime(df["collected_at"]).dt.tz_convert(CDMX)
+    df["hour"]           = df["collected_at"].dt.hour
+    df["dow"]            = df["collected_at"].dt.dayofweek
+    df["disponible"]     = (df["bikes_available"] >= 1).astype(int)
+    df["bikes_total"]    = df["bikes_available"] + df["bikes_disabled"]
+    df["disabled_ratio"] = df["bikes_disabled"] / df["bikes_total"].replace(0, pd.NA)
 
     # Filtrar horario fuera de operación EcoBici: 00:30–05:00 CDMX
     minutes = df["hour"] * 60 + df["collected_at"].dt.minute
@@ -102,20 +106,22 @@ with st.spinner("Cargando datos desde Supabase..."):
 # ---------------------------------------------------------------------------
 # Métricas principales
 # ---------------------------------------------------------------------------
-n_rows       = len(df)
-n_stations   = df["station_id"].nunique()
-n_colectas   = df["collected_at"].nunique()
-first_ts     = df["collected_at"].min()
-last_ts      = df["collected_at"].max()
-span_h       = (last_ts - first_ts).total_seconds() / 3600
-pct_disp     = df["disponible"].mean()
+n_rows          = len(df)
+n_stations      = df["station_id"].nunique()
+n_colectas      = df["collected_at"].nunique()
+first_ts        = df["collected_at"].min()
+last_ts         = df["collected_at"].max()
+span_h          = (last_ts - first_ts).total_seconds() / 3600
+pct_disp        = df["disponible"].mean()
+pct_disabled    = df["bikes_disabled"].sum() / df["bikes_total"].sum() if df["bikes_total"].sum() > 0 else 0
 
-c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("Registros totales",    f"{n_rows:,}")
-c2.metric("Estaciones activas",   f"{n_stations:,}")
-c3.metric("Recolecciones",        f"{n_colectas:,}")
-c4.metric("Horas de historial",   f"{span_h:.1f} h")
-c5.metric("Disponibilidad media", f"{pct_disp:.1%}")
+c1, c2, c3, c4, c5, c6 = st.columns(6)
+c1.metric("Registros totales",       f"{n_rows:,}")
+c2.metric("Estaciones activas",      f"{n_stations:,}")
+c3.metric("Recolecciones",           f"{n_colectas:,}")
+c4.metric("Horas de historial",      f"{span_h:.1f} h")
+c5.metric("Disponibilidad media",    f"{pct_disp:.1%}")
+c6.metric("🔧 Bicis descompuestas",  f"{pct_disabled:.1%}", delta="del total en circulación", delta_color="inverse")
 
 st.divider()
 
@@ -153,9 +159,9 @@ else:
 st.divider()
 
 # ---------------------------------------------------------------------------
-# EDA
+# EDA · Disponibilidad
 # ---------------------------------------------------------------------------
-st.subheader("Exploración de datos recolectados")
+st.subheader("Exploración de datos · Disponibilidad")
 
 # ── Fila 1: distribución de bicis + disponibilidad por hora ─────────────────
 col_a, col_b = st.columns(2)
@@ -255,7 +261,7 @@ with tab_bot:
     )
     st.plotly_chart(fig_bot, use_container_width=True)
 
-# ── Timeline (sólo si hay más de 1 recolección) ─────────────────────────────
+# ── Timeline disponibilidad ──────────────────────────────────────────────────
 if n_colectas > 1:
     st.markdown("**Evolución: promedio de bicis disponibles por recolección**")
     timeline = (
@@ -273,6 +279,102 @@ if n_colectas > 1:
     st.plotly_chart(fig_time, use_container_width=True)
 else:
     st.info("La línea de tiempo aparecerá cuando haya más de una recolección.")
+
+st.divider()
+
+# ---------------------------------------------------------------------------
+# Sección nueva · Bicis descompuestas 🔧
+# ---------------------------------------------------------------------------
+st.subheader("🔧 Análisis de bicis descompuestas")
+
+# ── Métrica de contexto ──────────────────────────────────────────────────────
+total_disabled  = int(df["bikes_disabled"].sum())
+avg_disabled    = df["bikes_disabled"].mean()
+worst_snapshot  = df.groupby("collected_at")["bikes_disabled"].sum().max()
+
+m1, m2, m3 = st.columns(3)
+m1.metric("Total registros con bici descompuesta", f"{total_disabled:,}")
+m2.metric("Promedio descompuestas por snapshot",   f"{avg_disabled:.2f}")
+m3.metric("Pico máximo en una recolección",        f"{int(worst_snapshot):,}")
+
+# ── Timeline de descomposturas ───────────────────────────────────────────────
+if n_colectas > 1:
+    st.markdown("**Evolución de bicis descompuestas a lo largo del tiempo**")
+    tl_disabled = (
+        df.groupby("collected_at")[["bikes_disabled", "bikes_available"]]
+        .mean()
+        .reset_index()
+        .rename(columns={
+            "bikes_disabled":  "Descompuestas (prom)",
+            "bikes_available": "Disponibles (prom)",
+        })
+    )
+    fig_tl_dis = px.line(
+        tl_disabled.melt(id_vars="collected_at", var_name="tipo", value_name="bicis"),
+        x="collected_at", y="bicis", color="tipo",
+        color_discrete_map={
+            "Descompuestas (prom)": "#e74c3c",
+            "Disponibles (prom)":   "#2980b9",
+        },
+        labels={"collected_at": "", "bicis": "Bicis (promedio por estación)", "tipo": ""},
+    )
+    fig_tl_dis.update_layout(margin=dict(t=5, b=5), height=300)
+    st.plotly_chart(fig_tl_dis, use_container_width=True)
+else:
+    st.info("La línea de tiempo aparecerá cuando haya más de una recolección.")
+
+# ── Ranking de estaciones con más descomposturas ─────────────────────────────
+st.markdown("**Estaciones con mayor tasa de bicis descompuestas** *(mín. 2 observaciones)*")
+
+disabled_stats = (
+    df.groupby(["station_id", "station_name"])
+    .agg(
+        avg_disabled=("bikes_disabled", "mean"),
+        avg_total=("bikes_total", "mean"),
+        observaciones=("bikes_disabled", "count"),
+    )
+    .reset_index()
+    .query("observaciones >= 2")
+)
+disabled_stats["pct_disabled"] = (
+    disabled_stats["avg_disabled"] / disabled_stats["avg_total"].replace(0, pd.NA)
+).fillna(0)
+
+tab_abs, tab_pct = st.tabs([
+    "Top 15 · más descompuestas (promedio absoluto)",
+    "Top 15 · mayor % de flota descompuesta",
+])
+
+with tab_abs:
+    top_abs = disabled_stats.nlargest(15, "avg_disabled")
+    fig_abs = px.bar(
+        top_abs, x="avg_disabled", y="station_name", orientation="h",
+        color="avg_disabled", color_continuous_scale="Reds",
+        text=top_abs["avg_disabled"].map("{:.1f}".format),
+        labels={"avg_disabled": "Descompuestas (prom)", "station_name": "Estación"},
+    )
+    fig_abs.update_traces(textposition="outside")
+    fig_abs.update_layout(
+        yaxis=dict(autorange="reversed"), margin=dict(t=5, b=5),
+        height=420, coloraxis_showscale=False,
+    )
+    st.plotly_chart(fig_abs, use_container_width=True)
+
+with tab_pct:
+    top_pct = disabled_stats.nlargest(15, "pct_disabled")
+    fig_pct = px.bar(
+        top_pct, x="pct_disabled", y="station_name", orientation="h",
+        color="pct_disabled", color_continuous_scale="OrRd",
+        range_color=[0, 1],
+        text=top_pct["pct_disabled"].map("{:.0%}".format),
+        labels={"pct_disabled": "% flota descompuesta", "station_name": "Estación"},
+    )
+    fig_pct.update_traces(textposition="outside")
+    fig_pct.update_layout(
+        yaxis=dict(autorange="reversed"), margin=dict(t=5, b=5),
+        height=420, coloraxis_showscale=False,
+    )
+    st.plotly_chart(fig_pct, use_container_width=True)
 
 # ---------------------------------------------------------------------------
 # Footer
