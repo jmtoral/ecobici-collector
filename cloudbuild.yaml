@@ -1,0 +1,25 @@
+steps:
+  - name: 'gcr.io/k8s-skaffold/pack'
+    dir: 'src'
+    args:
+      - build
+      - 'gcr.io/$PROJECT_ID/ecobici-collector'
+      - '--builder=gcr.io/buildpacks/builder:v1'
+      - '--env=GOOGLE_FUNCTION_TARGET=run_collector'
+      - '--env=GOOGLE_RUNTIME=python311'
+    id: Buildpack
+
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'gcloud'
+    args:
+      - 'run'
+      - 'deploy'
+      - 'ecobici-collector'
+      - '--image=gcr.io/$PROJECT_ID/ecobici-collector'
+      - '--region=us-central1'
+      - '--platform=managed'
+      - '--no-allow-unauthenticated'
+    id: Deploy
+
+images:
+  - 'gcr.io/$PROJECT_ID/ecobici-collector'
