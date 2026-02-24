@@ -4,7 +4,7 @@ steps:
     args:
       - build
       - 'gcr.io/$PROJECT_ID/ecobici-collector'
-      - '--builder=gcr.io/buildpacks/builder:v1'
+      - '--builder=gcr.io/buildpacks/builder:google-
       - '--env=GOOGLE_FUNCTION_TARGET=run_collector'
       - '--env=GOOGLE_RUNTIME=python311'
     id: Buildpack
