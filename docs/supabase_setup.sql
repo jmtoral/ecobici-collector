@@ -29,7 +29,6 @@ CREATE TRIGGER station_info_updated_at
     BEFORE UPDATE ON station_info
     FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
 
-
 -- -----------------------------------------------------------------------------
 -- Tabla: snapshots
 -- Un registro por estación por recolección (cada 15 minutos).
@@ -39,7 +38,9 @@ CREATE TABLE IF NOT EXISTS snapshots (
     collected_at     TIMESTAMPTZ  NOT NULL,
     station_id       TEXT         NOT NULL REFERENCES station_info(station_id),
     bikes_available  INTEGER      NOT NULL DEFAULT 0,
+    bikes_disabled   INTEGER      NOT NULL DEFAULT 0,
     docks_available  INTEGER      NOT NULL DEFAULT 0,
+    docks_disabled   INTEGER      NOT NULL DEFAULT 0,
     is_installed     BOOLEAN      NOT NULL DEFAULT TRUE,
     is_renting       BOOLEAN      NOT NULL DEFAULT FALSE,
     is_returning     BOOLEAN      NOT NULL DEFAULT FALSE
@@ -57,7 +58,6 @@ CREATE INDEX IF NOT EXISTS idx_snapshots_station_collected
 CREATE UNIQUE INDEX IF NOT EXISTS idx_snapshots_unique
     ON snapshots (collected_at, station_id);
 
-
 -- -----------------------------------------------------------------------------
 -- Vista: snapshots_view
 -- Agrega información de la estación para consultas de análisis/debugging.
@@ -67,17 +67,19 @@ SELECT
     s.id,
     s.collected_at,
     s.station_id,
-    si.name          AS station_name,
+    si.name              AS station_name,
     s.bikes_available,
+    s.bikes_disabled,
     s.docks_available,
+    s.docks_disabled,
     si.capacity,
+    (s.bikes_available + s.bikes_disabled) AS bikes_total,
     CASE WHEN s.bikes_available >= 1 THEN TRUE ELSE FALSE END AS disponible,
     s.is_installed,
     s.is_renting,
     s.is_returning
 FROM snapshots s
 LEFT JOIN station_info si USING (station_id);
-
 
 -- -----------------------------------------------------------------------------
 -- Notas de mantenimiento
