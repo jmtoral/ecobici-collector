@@ -409,41 +409,19 @@ if selected:
     fig_st.update_layout(margin=dict(t=5, b=5), height=350, legend=dict(orientation="h", y=1.05))
     st.plotly_chart(fig_st, use_container_width=True)
 
-    # Disponibilidad por hora para esta estación
-    hourly_st = (
-        df_st.groupby("hour")["disponible"]
-        .mean()
-        .reset_index()
-        .rename(columns={"disponible": "P(disponible)"})
-    )
-    fig_hr_st = px.bar(
-        hourly_st, x="hour", y="P(disponible)",
-        color="P(disponible)", color_continuous_scale="RdYlGn",
-        range_color=[0, 1],
-        labels={"hour": "Hora del día", "P(disponible)": "P(≥1 bici)"},
-    )
-    fig_hr_st.update_layout(
-        margin=dict(t=5, b=5), height=280,
-        coloraxis_showscale=False,
-        xaxis=dict(tickmode="linear", tick0=0, dtick=1),
-    )
-    st.markdown(f"**Disponibilidad por hora — {sel_name}**")
-    st.plotly_chart(fig_hr_st, use_container_width=True)
-
-    # Curva de probabilidad por hora con intervalo de confianza (Wilson)
+    # Curva de probabilidad suavizada por hora con intervalo de confianza (Wilson)
     st.markdown(f"**Curva de probabilidad P(≥1 bici) por hora — {sel_name}**")
     import numpy as np
-    from scipy import stats
+    from statsmodels.nonparametric.smoothers_lowess import lowess
 
     def wilson_ci(successes, total, z=1.96):
-        """Intervalo de confianza de Wilson al 95% para una proporción."""
         if total == 0:
             return 0.0, 0.0
         p = successes / total
         denom = 1 + z**2 / total
         center = (p + z**2 / (2 * total)) / denom
         margin = (z * np.sqrt(p * (1 - p) / total + z**2 / (4 * total**2))) / denom
-        return float(center - margin), float(center + margin)
+        return float(np.clip(center - margin, 0, 1)), float(np.clip(center + margin, 0, 1))
 
     hourly_ci = (
         df_st.groupby("hour")["disponible"]
@@ -451,34 +429,50 @@ if selected:
         .reset_index()
         .rename(columns={"sum": "exitos", "count": "total"})
     )
-    hourly_ci["p"]      = hourly_ci["exitos"] / hourly_ci["total"]
-    hourly_ci["ci_low"] = hourly_ci.apply(lambda r: wilson_ci(r.exitos, r.total)[0], axis=1)
-    hourly_ci["ci_high"]= hourly_ci.apply(lambda r: wilson_ci(r.exitos, r.total)[1], axis=1)
+    hourly_ci["p"]       = hourly_ci["exitos"] / hourly_ci["total"]
+    hourly_ci["ci_low"]  = hourly_ci.apply(lambda r: wilson_ci(r.exitos, r.total)[0], axis=1)
+    hourly_ci["ci_high"] = hourly_ci.apply(lambda r: wilson_ci(r.exitos, r.total)[1], axis=1)
 
-    fig_prob = px.line(
-        hourly_ci, x="hour", y="p",
-        labels={"hour": "Hora del día", "p": "P(≥1 bici)"},
-        color_discrete_sequence=["#27ae60"],
+    # Suavizado LOWESS sobre los puntos por hora (frac controla cuánto suaviza)
+    smoothed = lowess(hourly_ci["p"], hourly_ci["hour"], frac=0.35, return_sorted=True)
+    hourly_ci["p_smooth"] = np.clip(smoothed[:, 1], 0, 1)
+
+    import plotly.graph_objects as go
+    fig_prob = go.Figure()
+
+    # Banda IC Wilson (datos sin suavizar, refleja la incertidumbre real)
+    fig_prob.add_trace(go.Scatter(
+        x=hourly_ci["hour"].tolist() + hourly_ci["hour"].tolist()[::-1],
+        y=hourly_ci["ci_high"].tolist() + hourly_ci["ci_low"].tolist()[::-1],
+        fill="toself", fillcolor="rgba(39,174,96,0.15)",
+        line=dict(color="rgba(0,0,0,0)"),
+        hoverinfo="skip", name="IC 95% (Wilson)",
+    ))
+    # Puntos observados (sin suavizar)
+    fig_prob.add_trace(go.Scatter(
+        x=hourly_ci["hour"], y=hourly_ci["p"],
+        mode="markers", marker=dict(color="#27ae60", size=7, opacity=0.5),
+        name="P observada", hovertemplate="Hora %{x}h: %{y:.0%}<extra></extra>",
+    ))
+    # Curva suavizada
+    fig_prob.add_trace(go.Scatter(
+        x=hourly_ci["hour"], y=hourly_ci["p_smooth"],
+        mode="lines", line=dict(color="#27ae60", width=3),
+        name="Tendencia (LOWESS)", hovertemplate="Hora %{x}h: %{y:.0%}<extra></extra>",
+    ))
+    # Línea de referencia 50%
+    fig_prob.add_hline(
+        y=0.5, line_dash="dot", line_color="#e74c3c", line_width=1.5,
+        annotation_text="50%", annotation_position="top right",
+        annotation_font_color="#e74c3c",
     )
-    # Banda de confianza
-    fig_prob.add_traces([
-        dict(
-            type="scatter", x=hourly_ci["hour"].tolist() + hourly_ci["hour"].tolist()[::-1],
-            y=hourly_ci["ci_high"].tolist() + hourly_ci["ci_low"].tolist()[::-1],
-            fill="toself", fillcolor="rgba(39,174,96,0.15)",
-            line=dict(color="rgba(255,255,255,0)"),
-            hoverinfo="skip", showlegend=True, name="IC 95% (Wilson)",
-        )
-    ])
     fig_prob.update_layout(
-        margin=dict(t=5, b=5), height=300,
-        yaxis=dict(range=[0, 1], tickformat=".0%"),
-        xaxis=dict(tickmode="linear", tick0=0, dtick=1),
-        legend=dict(orientation="h", y=1.05),
+        margin=dict(t=10, b=5), height=320,
+        yaxis=dict(range=[0, 1], tickformat=".0%", title="P(≥1 bici)"),
+        xaxis=dict(tickmode="linear", tick0=0, dtick=1, title="Hora del día"),
+        legend=dict(orientation="h", y=1.08),
     )
-    fig_prob.add_hline(y=0.5, line_dash="dot", line_color="gray",
-                       annotation_text="50%", annotation_position="right")
-    st.caption(f"Basado en {len(df_st):,} observaciones · banda = intervalo de confianza Wilson al 95%")
+    st.caption(f"Basado en {len(df_st):,} observaciones · banda = IC Wilson 95% · curva = suavizado LOWESS")
     st.plotly_chart(fig_prob, use_container_width=True)
 
 st.divider()
