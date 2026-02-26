@@ -468,7 +468,12 @@ if selected:
     )
     fig_prob.update_layout(
         margin=dict(t=10, b=5), height=320,
-        yaxis=dict(range=[0, 1], tickformat=".0%", title="P(≥1 bici)"),
+        yaxis=dict(
+            range=[0, 1], fixedrange=True,
+            tickformat=".0%", tickvals=[0, 0.25, 0.5, 0.75, 1.0],
+            ticktext=["0%", "25%", "50%", "75%", "100%"],
+            title="P(≥1 bici)",
+        ),
         xaxis=dict(tickmode="linear", tick0=0, dtick=1, title="Hora del día"),
         legend=dict(orientation="h", y=1.08),
     )
