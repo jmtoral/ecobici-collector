@@ -76,7 +76,9 @@ def insert_snapshots(cur, stations: list[dict], collected_at: datetime, origin: 
         )
         for s in stations if s.get("station_id")
     ]
-    if rows: psycopg2.extras.execute_values(cur, sql, rows)
+    if rows:
+        psycopg2.extras.execute_values(cur, sql, rows)
+    return len(rows)
 
 def in_operating_hours(ts: datetime) -> bool:
     local = ts.astimezone(CDMX)
@@ -129,3 +131,7 @@ def run_collector(request):
     except Exception as exc:
         log.error(f"Error: {exc}")
         return f"ERROR: {exc}", 500
+
+# --- CLI: permite ejecutar directamente con `python src/main.py` ---
+if __name__ == "__main__":
+    collect("github-actions")

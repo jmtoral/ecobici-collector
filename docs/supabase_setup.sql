@@ -43,7 +43,8 @@ CREATE TABLE IF NOT EXISTS snapshots (
     docks_disabled   INTEGER      NOT NULL DEFAULT 0,
     is_installed     BOOLEAN      NOT NULL DEFAULT TRUE,
     is_renting       BOOLEAN      NOT NULL DEFAULT FALSE,
-    is_returning     BOOLEAN      NOT NULL DEFAULT FALSE
+    is_returning     BOOLEAN      NOT NULL DEFAULT FALSE,
+    origin           TEXT         DEFAULT 'unknown'
 );
 
 -- Índice principal para consultas de entrenamiento (por tiempo y estación)
@@ -77,7 +78,8 @@ SELECT
     CASE WHEN s.bikes_available >= 1 THEN TRUE ELSE FALSE END AS disponible,
     s.is_installed,
     s.is_renting,
-    s.is_returning
+    s.is_returning,
+    s.origin
 FROM snapshots s
 LEFT JOIN station_info si USING (station_id);
 

@@ -10,7 +10,7 @@ Despliegue: Streamlit Community Cloud
 """
 
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -26,6 +26,22 @@ CDMX          = ZoneInfo("America/Mexico_City")
 GITHUB_REPO   = "jmtoral/ecobici-collector"
 WORKFLOW_FILE = "collect.yml"
 DIAS          = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+GAP_THRESHOLD = pd.Timedelta(hours=2)  # gap nocturno 00:30–05:00
+
+
+def break_night_gaps(tl: pd.DataFrame, time_col: str = "collected_at",
+                     value_cols: list[str] | None = None) -> pd.DataFrame:
+    """Inserta filas con None en gaps > 2h para que plotly corte la línea."""
+    tl = tl.sort_values(time_col).copy()
+    gaps = tl[time_col].diff() > GAP_THRESHOLD
+    if not gaps.any():
+        return tl
+    null_rows = tl.loc[gaps, [time_col]].copy()
+    null_rows[time_col] = null_rows[time_col] - pd.Timedelta(minutes=1)
+    cols = value_cols or [c for c in tl.columns if c != time_col]
+    for c in cols:
+        null_rows[c] = None
+    return pd.concat([tl, null_rows]).sort_values(time_col).reset_index(drop=True)
 
 st.set_page_config(
     page_title="EcoBici Dashboard",
@@ -50,6 +66,7 @@ def load_data() -> pd.DataFrame:
             s.docks_available,
             s.docks_disabled,
             s.is_renting,
+            COALESCE(s.origin, 'unknown') AS origin,
             COALESCE(si.name, s.station_id) AS station_name,
             si.capacity
         FROM snapshots s
@@ -155,6 +172,84 @@ if runs:
         )
 else:
     st.info("No se pudo obtener el estado de GitHub Actions (repo público requerido).")
+
+# ---------------------------------------------------------------------------
+# Estado del pipeline · Recolecciones por origen
+# ---------------------------------------------------------------------------
+st.subheader("Recolecciones por origen")
+
+# Conteo por origin
+origin_labels = {
+    "google-cloud":   "☁️ Google Cloud Scheduler",
+    "github-actions": "🐙 GitHub Actions",
+    "manual":         "🖐️ Manual",
+    "unknown":        "❓ Sin etiquetar (legacy)",
+}
+
+# Snapshots únicos por recolección y origin
+origin_stats = (
+    df.groupby("origin")["collected_at"]
+    .agg(recolecciones="nunique", registros="count")
+    .reset_index()
+    .sort_values("registros", ascending=False)
+)
+origin_stats["label"] = origin_stats["origin"].map(origin_labels).fillna(origin_stats["origin"])
+
+# Última recolección por origin
+last_by_origin = df.groupby("origin")["collected_at"].max().reset_index()
+last_by_origin.columns = ["origin", "ultima_recoleccion"]
+origin_stats = origin_stats.merge(last_by_origin, on="origin")
+
+cols_origin = st.columns(len(origin_stats))
+for col, (_, row) in zip(cols_origin, origin_stats.iterrows()):
+    last_str = row["ultima_recoleccion"].strftime("%d/%m %H:%M")
+    col.metric(
+        label=row["label"],
+        value=f'{row["recolecciones"]:,} recolecciones',
+        delta=f'Última: {last_str}',
+        delta_color="off",
+    )
+
+# ── Indicador de salud del Scheduler ──────────────────────────────────────
+now_cdmx = datetime.now(CDMX)
+now_minutes = now_cdmx.hour * 60 + now_cdmx.minute
+in_operating_hours = not (30 <= now_minutes < 300)
+
+gc_data = df[df["origin"] == "google-cloud"]
+if not gc_data.empty and in_operating_hours:
+    last_gc = gc_data["collected_at"].max()
+    ago = now_cdmx - last_gc
+    ago_min = ago.total_seconds() / 60
+    if ago_min < 20:
+        st.success(f"🟢 **Google Cloud Scheduler OK** — última recolección hace {ago_min:.0f} min")
+    elif ago_min < 45:
+        st.warning(f"🟡 **Posible retraso en Scheduler** — última recolección hace {ago_min:.0f} min")
+    else:
+        st.error(f"🔴 **Scheduler sin respuesta** — última recolección hace {ago_min:.0f} min ({last_gc.strftime('%d/%m %H:%M')})")
+elif not in_operating_hours:
+    st.info("🌙 **Fuera de horario operativo** (00:30–05:00 CDMX) — el Scheduler no recolecta en este horario")
+
+# Gráfica de recolecciones por origen a lo largo del tiempo
+if n_colectas > 1:
+    st.markdown("**Recolecciones por origen a lo largo del tiempo**")
+    origin_timeline = (
+        df.groupby([pd.Grouper(key="collected_at", freq="D"), "origin"])
+        .size()
+        .reset_index(name="snapshots")
+    )
+    origin_timeline["origin_label"] = origin_timeline["origin"].map(origin_labels).fillna(origin_timeline["origin"])
+    fig_origin = px.bar(
+        origin_timeline, x="collected_at", y="snapshots", color="origin_label",
+        color_discrete_map={
+            "☁️ Google Cloud Scheduler": "#4285F4",
+            "🐙 GitHub Actions":         "#24292e",
+            "🖐️ Manual":                 "#f39c12",
+            "❓ Sin etiquetar (legacy)":  "#95a5a6",
+        },
+        labels={"collected_at": "", "snapshots": "Snapshots/día", "origin_label": "Origen"},
+    )
+    fig_origin.update_layout(margin=dict(t=5, b=5), height=280, barmode="stack")
+    st.plotly_chart(fig_origin, use_container_width=True)
 
 st.divider()
 
@@ -270,6 +365,7 @@ if n_colectas > 1:
         .reset_index()
         .rename(columns={"bikes_available": "bicis_promedio"})
     )
+    timeline = break_night_gaps(timeline, value_cols=["bicis_promedio"])
     fig_time = px.line(
         timeline, x="collected_at", y="bicis_promedio",
         color_discrete_sequence=["#2980b9"],
@@ -308,6 +404,9 @@ if n_colectas > 1:
             "bikes_disabled":  "Descompuestas (prom)",
             "bikes_available": "Disponibles (prom)",
         })
+    )
+    tl_disabled = break_night_gaps(
+        tl_disabled, value_cols=["Descompuestas (prom)", "Disponibles (prom)"]
     )
     fig_tl_dis = px.line(
         tl_disabled.melt(id_vars="collected_at", var_name="tipo", value_name="bicis"),
