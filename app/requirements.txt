@@ -5,5 +5,7 @@ numpy>=1.26
 scikit-learn>=1.4
 scipy>=1.12
 statsmodels>=0.14
+h3>=3.7
+pydeck>=0.9
 streamlit>=1.35
 plotly>=5.20

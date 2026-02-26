@@ -52,7 +52,9 @@ def load_data() -> pd.DataFrame:
             s.is_renting,
             COALESCE(s.origin, 'unknown') AS origin,
             COALESCE(si.name, s.station_id) AS station_name,
-            si.capacity
+            si.capacity,
+            si.lat,
+            si.lon
         FROM snapshots s
         LEFT JOIN station_info si USING (station_id)
         WHERE s.is_installed = TRUE
@@ -491,6 +493,105 @@ if selected:
     )
     st.caption(f"Basado en {len(df_st):,} observaciones · banda = IC Wilson 95% · curva = suavizado LOWESS")
     st.plotly_chart(fig_prob, use_container_width=True)
+
+st.divider()
+
+# ---------------------------------------------------------------------------
+# Mapa H3 · Disponibilidad por zona
+# ---------------------------------------------------------------------------
+st.subheader("🗺️ Mapa de disponibilidad por zona (H3)")
+
+import h3
+import pydeck as pdk
+
+mapbox_token = st.secrets.get("MAPBOX_TOKEN") or os.environ.get("MAPBOX_TOKEN", "")
+
+# Disponibilidad y coordenadas por estación
+station_map = (
+    df.dropna(subset=["lat", "lon"])
+    .groupby(["station_id", "station_name", "lat", "lon"])
+    .agg(
+        p_disponible=("disponible", "mean"),
+        n_obs=("disponible", "count"),
+        avg_bikes=("bikes_available", "mean"),
+        avg_disabled=("bikes_disabled", "mean"),
+    )
+    .reset_index()
+    .query("n_obs >= 5")
+)
+
+res_col, _ = st.columns([1, 3])
+with res_col:
+    resolution = st.select_slider(
+        "Resolución H3",
+        options=[7, 8, 9],
+        value=8,
+        format_func=lambda r: {7: "7 · colonias (~1.2 km)", 8: "8 · barrios (~460 m)", 9: "9 · manzanas (~170 m)"}[r],
+    )
+
+# Asignar hexágono H3 a cada estación
+station_map["h3_cell"] = station_map.apply(
+    lambda r: h3.latlng_to_cell(r.lat, r.lon, resolution), axis=1
+)
+
+# Agregar por hexágono
+hex_stats = (
+    station_map.groupby("h3_cell")
+    .agg(
+        p_disponible=("p_disponible", "mean"),
+        n_estaciones=("station_id", "count"),
+        avg_bikes=("avg_bikes", "mean"),
+        avg_disabled=("avg_disabled", "mean"),
+    )
+    .reset_index()
+)
+
+# Color RdYlGn: rojo (0%) → amarillo (50%) → verde (100%)
+def prob_to_rgb(p):
+    p = max(0.0, min(1.0, p))
+    if p < 0.5:
+        r, g = 220, int(220 * p * 2)
+    else:
+        r, g = int(220 * (1 - p) * 2), 180
+    return [r, g, 40, 180]
+
+hex_stats["color"] = hex_stats["p_disponible"].apply(prob_to_rgb)
+hex_stats["tooltip_text"] = hex_stats.apply(
+    lambda r: f"P(≥1 bici): {r.p_disponible:.0%} · {r.n_estaciones} estación(es) · "
+              f"Bicis prom: {r.avg_bikes:.1f} · Descomp: {r.avg_disabled:.1f}",
+    axis=1,
+)
+
+layer = pdk.Layer(
+    "H3HexagonLayer",
+    data=hex_stats,
+    get_hexagon="h3_cell",
+    get_fill_color="color",
+    get_line_color=[80, 80, 80],
+    line_width_min_pixels=1,
+    pickable=True,
+    extruded=False,
+    opacity=0.75,
+)
+
+view = pdk.ViewState(
+    latitude=19.432,
+    longitude=-99.133,
+    zoom=11.5,
+    pitch=0,
+)
+
+st.pydeck_chart(
+    pdk.Deck(
+        layers=[layer],
+        initial_view_state=view,
+        map_style="mapbox://styles/mapbox/dark-v11",
+        api_keys={"mapbox": mapbox_token},
+        tooltip={"text": "{tooltip_text}"},
+    ),
+    height=500,
+)
+st.caption("Color: verde = alta disponibilidad · rojo = baja disponibilidad · hover para detalles por hexágono")
 
 st.divider()
 
