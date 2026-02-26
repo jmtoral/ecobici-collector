@@ -359,6 +359,77 @@ if n_colectas > 1:
 else:
     st.info("La línea de tiempo aparecerá cuando haya más de una recolección.")
 
+# ── Explorador por estación ────────────────────────────────────────────────
+st.divider()
+st.subheader("🔍 Explorador por estación")
+
+station_options = (
+    df.groupby(["station_id", "station_name"])
+    .size()
+    .reset_index(name="_n")
+    .sort_values("station_name")
+)
+station_options["label"] = station_options["station_name"] + " (" + station_options["station_id"] + ")"
+
+selected = st.selectbox(
+    "Busca o selecciona una estación",
+    options=station_options["label"].tolist(),
+    index=None,
+    placeholder="Escribe el nombre de una estación...",
+)
+
+if selected:
+    sel_id = station_options.loc[station_options["label"] == selected, "station_id"].iloc[0]
+    df_st = df[df["station_id"] == sel_id].sort_values("collected_at")
+    sel_name = df_st["station_name"].iloc[0]
+
+    # Métricas de la estación
+    s1, s2, s3, s4 = st.columns(4)
+    s1.metric("Observaciones", f"{len(df_st):,}")
+    s2.metric("Disponibilidad", f"{df_st['disponible'].mean():.0%}")
+    s3.metric("Bicis prom.", f"{df_st['bikes_available'].mean():.1f}")
+    s4.metric("Descompuestas prom.", f"{df_st['bikes_disabled'].mean():.1f}")
+
+    # Gráfica de evolución
+    fig_st = px.line(
+        df_st, x="collected_at", y=["bikes_available", "bikes_disabled"],
+        color_discrete_map={
+            "bikes_available": "#2980b9",
+            "bikes_disabled":  "#e74c3c",
+        },
+        labels={
+            "collected_at": "",
+            "value": "Bicis",
+            "variable": "",
+        },
+    )
+    fig_st.for_each_trace(lambda t: t.update(
+        name="Disponibles" if "available" in t.name else "Descompuestas"
+    ))
+    fig_st.update_layout(margin=dict(t=5, b=5), height=350, legend=dict(orientation="h", y=1.05))
+    st.plotly_chart(fig_st, use_container_width=True)
+
+    # Disponibilidad por hora para esta estación
+    hourly_st = (
+        df_st.groupby("hour")["disponible"]
+        .mean()
+        .reset_index()
+        .rename(columns={"disponible": "P(disponible)"})
+    )
+    fig_hr_st = px.bar(
+        hourly_st, x="hour", y="P(disponible)",
+        color="P(disponible)", color_continuous_scale="RdYlGn",
+        range_color=[0, 1],
+        labels={"hour": "Hora del día", "P(disponible)": "P(≥1 bici)"},
+    )
+    fig_hr_st.update_layout(
+        margin=dict(t=5, b=5), height=280,
+        coloraxis_showscale=False,
+        xaxis=dict(tickmode="linear", tick0=0, dtick=1),
+    )
+    st.markdown(f"**Disponibilidad por hora — {sel_name}**")
+    st.plotly_chart(fig_hr_st, use_container_width=True)
+
 st.divider()
 
 # ---------------------------------------------------------------------------
