@@ -430,6 +430,57 @@ if selected:
     st.markdown(f"**Disponibilidad por hora — {sel_name}**")
     st.plotly_chart(fig_hr_st, use_container_width=True)
 
+    # Curva de probabilidad por hora con intervalo de confianza (Wilson)
+    st.markdown(f"**Curva de probabilidad P(≥1 bici) por hora — {sel_name}**")
+    import numpy as np
+    from scipy import stats
+
+    def wilson_ci(successes, total, z=1.96):
+        """Intervalo de confianza de Wilson al 95% para una proporción."""
+        if total == 0:
+            return 0.0, 0.0
+        p = successes / total
+        denom = 1 + z**2 / total
+        center = (p + z**2 / (2 * total)) / denom
+        margin = (z * np.sqrt(p * (1 - p) / total + z**2 / (4 * total**2))) / denom
+        return float(center - margin), float(center + margin)
+
+    hourly_ci = (
+        df_st.groupby("hour")["disponible"]
+        .agg(["sum", "count"])
+        .reset_index()
+        .rename(columns={"sum": "exitos", "count": "total"})
+    )
+    hourly_ci["p"]      = hourly_ci["exitos"] / hourly_ci["total"]
+    hourly_ci["ci_low"] = hourly_ci.apply(lambda r: wilson_ci(r.exitos, r.total)[0], axis=1)
+    hourly_ci["ci_high"]= hourly_ci.apply(lambda r: wilson_ci(r.exitos, r.total)[1], axis=1)
+
+    fig_prob = px.line(
+        hourly_ci, x="hour", y="p",
+        labels={"hour": "Hora del día", "p": "P(≥1 bici)"},
+        color_discrete_sequence=["#27ae60"],
+    )
+    # Banda de confianza
+    fig_prob.add_traces([
+        dict(
+            type="scatter", x=hourly_ci["hour"].tolist() + hourly_ci["hour"].tolist()[::-1],
+            y=hourly_ci["ci_high"].tolist() + hourly_ci["ci_low"].tolist()[::-1],
+            fill="toself", fillcolor="rgba(39,174,96,0.15)",
+            line=dict(color="rgba(255,255,255,0)"),
+            hoverinfo="skip", showlegend=True, name="IC 95% (Wilson)",
+        )
+    ])
+    fig_prob.update_layout(
+        margin=dict(t=5, b=5), height=300,
+        yaxis=dict(range=[0, 1], tickformat=".0%"),
+        xaxis=dict(tickmode="linear", tick0=0, dtick=1),
+        legend=dict(orientation="h", y=1.05),
+    )
+    fig_prob.add_hline(y=0.5, line_dash="dot", line_color="gray",
+                       annotation_text="50%", annotation_position="right")
+    st.caption(f"Basado en {len(df_st):,} observaciones · banda = intervalo de confianza Wilson al 95%")
+    st.plotly_chart(fig_prob, use_container_width=True)
+
 st.divider()
 
 # ---------------------------------------------------------------------------

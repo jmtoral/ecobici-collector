@@ -3,5 +3,6 @@ requests>=2.31
 pandas>=2.0
 numpy>=1.26
 scikit-learn>=1.4
+scipy>=1.12
 streamlit>=1.35
 plotly>=5.20
