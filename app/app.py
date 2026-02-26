@@ -440,10 +440,14 @@ if selected:
     import plotly.graph_objects as go
     fig_prob = go.Figure()
 
-    # Banda IC Wilson (datos sin suavizar, refleja la incertidumbre real)
+    # Banda IC Wilson: recorre horas 0→23 por arriba y 23→0 por abajo
+    horas_asc  = hourly_ci["hour"].tolist()
+    horas_desc = horas_asc[::-1]
+    ci_high    = hourly_ci["ci_high"].tolist()
+    ci_low     = hourly_ci["ci_low"].tolist()
     fig_prob.add_trace(go.Scatter(
-        x=hourly_ci["hour"].tolist() + hourly_ci["hour"].tolist()[::-1],
-        y=hourly_ci["ci_high"].tolist() + hourly_ci["ci_low"].tolist()[::-1],
+        x=horas_asc + horas_desc,
+        y=ci_high + ci_low[::-1],
         fill="toself", fillcolor="rgba(39,174,96,0.15)",
         line=dict(color="rgba(0,0,0,0)"),
         hoverinfo="skip", name="IC 95% (Wilson)",
@@ -470,11 +474,14 @@ if selected:
         margin=dict(t=10, b=5), height=320,
         yaxis=dict(
             range=[0, 1], fixedrange=True,
-            tickformat=".0%", tickvals=[0, 0.25, 0.5, 0.75, 1.0],
+            tickvals=[0, 0.25, 0.5, 0.75, 1.0],
             ticktext=["0%", "25%", "50%", "75%", "100%"],
             title="P(≥1 bici)",
         ),
-        xaxis=dict(tickmode="linear", tick0=0, dtick=1, title="Hora del día"),
+        xaxis=dict(
+            range=[0, 23], fixedrange=True,
+            tickmode="linear", tick0=0, dtick=1, title="Hora del día",
+        ),
         legend=dict(orientation="h", y=1.08),
     )
     st.caption(f"Basado en {len(df_st):,} observaciones · banda = IC Wilson 95% · curva = suavizado LOWESS")
