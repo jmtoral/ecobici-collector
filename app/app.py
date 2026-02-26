@@ -10,7 +10,7 @@ Despliegue: Streamlit Community Cloud
 """
 
 import os
-from datetime import datetime, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -26,22 +26,6 @@ CDMX          = ZoneInfo("America/Mexico_City")
 GITHUB_REPO   = "jmtoral/ecobici-collector"
 WORKFLOW_FILE = "collect.yml"
 DIAS          = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
-GAP_THRESHOLD = pd.Timedelta(hours=2)  # gap nocturno 00:30–05:00
-
-
-def break_night_gaps(tl: pd.DataFrame, time_col: str = "collected_at",
-                     value_cols: list[str] | None = None) -> pd.DataFrame:
-    """Inserta filas con None en gaps > 2h para que plotly corte la línea."""
-    tl = tl.sort_values(time_col).copy()
-    gaps = tl[time_col].diff() > GAP_THRESHOLD
-    if not gaps.any():
-        return tl
-    null_rows = tl.loc[gaps, [time_col]].copy()
-    null_rows[time_col] = null_rows[time_col] - pd.Timedelta(minutes=1)
-    cols = value_cols or [c for c in tl.columns if c != time_col]
-    for c in cols:
-        null_rows[c] = None
-    return pd.concat([tl, null_rows]).sort_values(time_col).reset_index(drop=True)
 
 st.set_page_config(
     page_title="EcoBici Dashboard",
@@ -365,7 +349,6 @@ if n_colectas > 1:
         .reset_index()
         .rename(columns={"bikes_available": "bicis_promedio"})
     )
-    timeline = break_night_gaps(timeline, value_cols=["bicis_promedio"])
     fig_time = px.line(
         timeline, x="collected_at", y="bicis_promedio",
         color_discrete_sequence=["#2980b9"],
@@ -404,9 +387,6 @@ if n_colectas > 1:
             "bikes_disabled":  "Descompuestas (prom)",
             "bikes_available": "Disponibles (prom)",
         })
-    )
-    tl_disabled = break_night_gaps(
-        tl_disabled, value_cols=["Descompuestas (prom)", "Disponibles (prom)"]
     )
     fig_tl_dis = px.line(
         tl_disabled.melt(id_vars="collected_at", var_name="tipo", value_name="bicis"),
