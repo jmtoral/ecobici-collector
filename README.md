@@ -9,20 +9,22 @@ Pipeline automatizado para recolectar datos de disponibilidad de bicicletas en *
 1. [¿Qué hace este proyecto?](#qué-hace-este-proyecto)
 2. [Arquitectura](#arquitectura)
 3. [Estructura del proyecto](#estructura-del-proyecto)
-4. [Workflows y cron](#workflows-y-cron)
-5. [¿Por qué Supabase?](#por-qué-supabase)
-6. [¿Por qué 15 minutos?](#por-qué-15-minutos)
-7. [Costos y límites gratuitos](#costos-y-límites-gratuitos)
-8. [El modelo](#el-modelo)
-9. [Setup paso a paso](#setup-paso-a-paso)
-10. [Uso del CLI de predicción](#uso-del-cli-de-predicción)
-11. [Dependencias](#dependencias)
+4. [¿Por qué Google Cloud en vez de GitHub Actions?](#por-qué-google-cloud-en-vez-de-github-actions)
+5. [Scheduling y cron](#scheduling-y-cron)
+6. [¿Por qué Supabase?](#por-qué-supabase)
+7. [¿Por qué 15 minutos?](#por-qué-15-minutos)
+8. [Costos y límites gratuitos](#costos-y-límites-gratuitos)
+9. [El modelo](#el-modelo)
+10. [Setup paso a paso](#setup-paso-a-paso)
+11. [Uso del CLI de predicción](#uso-del-cli-de-predicción)
+12. [Dashboard](#dashboard)
+13. [Dependencias](#dependencias)
 
 ---
 
 ## ¿Qué hace este proyecto?
 
-EcoBici expone el estado de sus estaciones en tiempo real a través de un API público en formato [GBFS](https://gbfs.org/) (General Bikeshare Feed Specification). Cada llamada devuelve, para cada estación, cuántas bicis y cuántos espacios libres hay en ese momento.
+EcoBici expone el estado de sus estaciones en tiempo real a través de un API público en formato [GBFS](https://gbfs.org/) (General Bikeshare Feed Specification). Cada llamada devuelve, para cada estación, cuántas bicis hay disponibles, cuántas están descompuestas y cuántos espacios libres existen.
 
 Este proyecto:
 
@@ -40,29 +42,37 @@ La pregunta que responde el modelo es simple: _"Si voy a la estación X un marte
 flowchart TD
     API["GBFS API\ngbfs.mex.lyftbikes.com"]
 
+    subgraph GCP["Google Cloud Platform"]
+        SCH["Cloud Scheduler\ncada 15 min"]
+        CR["Cloud Run\necobici-collector"]
+    end
+
     subgraph GHA["GitHub Actions"]
-        WC["collect.yml\ncada 15 min"]
         WT["train.yml\ncada domingo 3am UTC"]
         WK["keepalive.yml\ncada 3 días"]
+        WC["collect.yml\nbackup · cada 15 min"]
     end
 
     subgraph SRC["src/"]
-        COL["collector.py"]
+        MAIN["main.py\nrun_collector()"]
         TRN["train.py"]
         PRD["predict.py"]
     end
 
     subgraph DB["Supabase (PostgreSQL)"]
         SI["station_info\nnombre, capacidad, lat/lon"]
-        SN["snapshots\nbikes_available por estación y timestamp"]
+        SN["snapshots\nbikes_available, bikes_disabled\norigin: google-cloud | github-actions"]
     end
 
     PKL["ecobici_model.pkl\nGitHub Release"]
+    DASH["Dashboard\nStreamlit Cloud"]
 
-    WC -->|"ejecuta"| COL
-    COL -->|"GET"| API
-    COL -->|"INSERT"| SN
-    COL -->|"UPSERT"| SI
+    SCH -->|"HTTP POST"| CR
+    CR -->|"ejecuta"| MAIN
+    WC -->|"ejecuta"| MAIN
+    MAIN -->|"GET"| API
+    MAIN -->|"INSERT"| SN
+    MAIN -->|"UPSERT"| SI
 
     WT -->|"ejecuta"| TRN
     TRN -->|"SELECT"| SN
@@ -74,6 +84,9 @@ flowchart TD
     PKL -->|"carga"| PRD
     API -->|"GET estado actual"| PRD
     PRD -->|"imprime"| OUT["Reporte / Probabilidad"]
+
+    SN -->|"lee"| DASH
+    SI -->|"lee"| DASH
 ```
 
 ---
@@ -83,53 +96,107 @@ flowchart TD
 ```
 ecobici-collector/
 ├── src/
-│   ├── collector.py    # Descarga el API GBFS y persiste en Supabase
-│   ├── train.py        # Entrena GradientBoostingClassifier con los snapshots
-│   └── predict.py      # CLI: predicción por estación o reporte completo
+│   ├── main.py            # Collector: Cloud Functions + GitHub Actions (dual trigger)
+│   ├── train.py           # Entrenamiento semanal del modelo
+│   ├── predict.py         # CLI: predicción por estación o reporte completo
+│   ├── requirements.txt   # Dependencias del collector (Cloud Functions)
+│   └── Procfile           # Entrypoint para functions-framework
+├── app/
+│   └── app.py             # Dashboard Streamlit con EDA y monitoreo
 ├── .github/
 │   └── workflows/
-│       ├── collect.yml    # Trigger: cada 15 min
-│       ├── train.yml      # Trigger: cada domingo a las 3am UTC
-│       └── keepalive.yml  # Trigger: cada 3 días (evita pausa en Supabase free)
+│       ├── collect.yml    # Backup: cada 15 min vía GitHub Actions
+│       ├── train.yml      # Entrenamiento: domingo 3am UTC
+│       └── keepalive.yml  # Ping Supabase: cada 3 días
 ├── docs/
-│   └── supabase_setup.sql  # Schema completo: tablas, índices, vista
-├── requirements.txt
+│   └── supabase_setup.sql # Schema completo: tablas, índices, vista
+├── cloudbuild.yaml        # Pipeline de Cloud Build (buildpacks → Cloud Run)
+├── requirements.txt       # Dependencias generales (ML, dashboard)
+├── requirements_app.txt   # Dependencias de Streamlit
 ├── .gitignore
 └── README.md
 ```
 
 ---
 
-## Workflows y cron
+## ¿Por qué Google Cloud en vez de GitHub Actions?
 
-El proyecto tiene tres workflows de GitHub Actions. Ninguno requiere intervención manual una vez configurado.
+El proyecto inició con GitHub Actions como único scheduler. Funcionaba, pero presentó un problema estructural: **los crons de GitHub Actions son erráticos**.
 
-### `collect.yml` — Recolección de snapshots
+### El problema
+
+GitHub Actions ejecuta workflows con schedule (`cron`) en una cola compartida entre millones de repos. En la práctica esto significa:
+
+- **Retrasos de 5 a 30 minutos** son normales, incluso en horarios no pico
+- **Runs se saltan por completo** cuando la infraestructura de GitHub está saturada
+- **Repos nuevos o con poca actividad se depriorizan** — el schedule puede tardar horas o incluso un día entero en activarse la primera vez
+- **No hay garantía de intervalo**: un cron de `*/15` puede ejecutarse a los 8 min, luego a los 35, luego saltarse
+
+Para un pipeline de recolección de datos que necesita consistencia temporal, esta variabilidad era inaceptable.
+
+### La solución: Google Cloud Scheduler + Cloud Run
+
+Google Cloud Scheduler es un servicio de cron gestionado con **precisión de segundos**. La migración fue:
+
+| Componente | Antes (GitHub Actions) | Ahora (Google Cloud) |
+|---|---|---|
+| Scheduler | `cron: "*/15 * * * *"` en `.yml` | Google Cloud Scheduler (HTTP) |
+| Runtime | Runner efímero Ubuntu | Cloud Run (contenedor permanente) |
+| Build | N/A | Cloud Build con buildpacks |
+| Precisión | ±5-30 min | ±1 segundo |
+| Costo | Gratis (2,000 min/mes) | ~$0 (free tier de GCP) |
+
+### Cómo funciona el dual trigger
+
+El collector (`src/main.py`) detecta automáticamente quién lo invoca y registra el **origin** en la base de datos:
+
+```python
+def run_collector(request):
+    ua = request.headers.get('User-Agent', '').lower()
+    if 'google-cloud-scheduler' in ua:
+        origin = 'google-cloud'
+    elif 'github' in ua:
+        origin = 'github-actions'
+    else:
+        origin = 'manual'
+    return collect(origin)
+```
+
+Esto permite:
+- **Google Cloud Scheduler** como fuente principal (preciso, confiable)
+- **GitHub Actions** como backup (redundancia por si GCP falla)
+- **Trazabilidad**: cada snapshot tiene registrado quién lo generó
+- La restricción de unicidad (`collected_at, station_id`) evita duplicados si ambos corren al mismo momento
+
+### ¿Por qué no se descartó GitHub Actions por completo?
+
+GitHub Actions sigue siendo útil para:
+- `train.yml` — el entrenamiento semanal no requiere precisión de segundos; una vez a la semana está bien
+- `keepalive.yml` — el ping a Supabase cada 3 días es tolerante a retrasos
+- `collect.yml` — funciona como red de seguridad en caso de fallo de GCP
+
+---
+
+## Scheduling y cron
+
+### Google Cloud Scheduler — Recolección principal
 
 ```
-┌─────────────────── cada 15 min ───────────────────────┐
-│                                                        │
-│   cron: "*/15 * * * *"   (UTC)                        │
-│                                                        │
-│   Horario operativo EcoBici: 05:00 – 00:30 CDMX       │
-│   Cierre del sistema:        00:30 – 05:00 CDMX       │
-│                                                        │
-│   El script detecta si está dentro del horario.       │
-│   Si no → sale sin llamar al API ni escribir en DB.   │
-└────────────────────────────────────────────────────────┘
+Frecuencia: */15 * * * *  (cada 15 minutos)
+Objetivo:   HTTP POST → Cloud Run (ecobici-collector)
+Precisión:  < 1 segundo de desviación
 ```
 
-| Expresión cron | Significado |
-|----------------|-------------|
-| `*/15` | Cada 15 minutos |
-| `*` (hora) | Todas las horas |
-| `*` (día) | Todos los días |
-| `*` (mes) | Todos los meses |
-| `*` (día semana) | Todos los días de la semana |
+El Cloud Scheduler envía un request HTTP al contenedor en Cloud Run. El contenedor ejecuta `run_collector()`, que:
 
-> GitHub Actions ejecuta crons en UTC. La conversión a hora CDMX (UTC-6 en invierno, UTC-5 en verano) la hace el propio script Python, lo que garantiza que el horario de cierre se respeta correctamente aunque cambie el horario de verano.
+1. Detecta el origen del request (Google Cloud Scheduler)
+2. Verifica si está dentro del horario operativo (05:00–00:30 CDMX)
+3. Si está fuera de horario → responde 200 sin hacer nada
+4. Si está dentro → descarga el API GBFS, persiste en Supabase, responde 200
 
-### `train.yml` — Entrenamiento semanal
+### GitHub Actions — Entrenamiento y mantenimiento
+
+#### `train.yml` — Entrenamiento semanal
 
 ```
 cron: "0 3 * * 0"
@@ -138,9 +205,9 @@ cron: "0 3 * * 0"
          └──────── minuto 0
 ```
 
-Se reentrena cada domingo de madrugada para incorporar todos los datos acumulados durante la semana. El modelo resultante se publica como GitHub Release con el archivo `.pkl`.
+Se reentrena cada domingo con todos los datos acumulados. El modelo resultante se publica como GitHub Release con el archivo `.pkl`.
 
-### `keepalive.yml` — Ping a Supabase
+#### `keepalive.yml` — Ping a Supabase
 
 ```
 cron: "0 12 */3 * *"
@@ -150,55 +217,19 @@ cron: "0 12 */3 * *"
 
 Supabase pausa automáticamente los proyectos gratuitos que no reciben actividad por 7 días. Este workflow hace una consulta mínima (`SELECT COUNT(*)`) cada 3 días para mantener la base de datos activa.
 
----
+#### `collect.yml` — Backup del collector
 
-## Costos y límites gratuitos
-
-El proyecto está diseñado para correr **completamente gratis** usando los planes free de GitHub Actions y Supabase.
-
-### GitHub Actions — 2,000 min/mes incluidos (se renuevan el 1° de cada mes)
-
-| Workflow | Runs/mes | Min/run | Min/mes |
-|----------|----------|---------|---------|
-| `collect.yml` en horario operativo | ~2,340 | ~0.5 | ~1,170 |
-| `collect.yml` fuera de horario (salida rápida) | ~540 | ~0.05 | ~27 |
-| `train.yml` semanal | ~4 | ~5 | ~20 |
-| `keepalive.yml` cada 3 días | ~10 | ~0.3 | ~3 |
-| **Total estimado** | | | **~1,220** |
-| **Cuota gratuita** | | | **2,000** |
-| **Margen disponible** | | | **~780 (39%)** |
-
-> Si en algún mes se agotan los minutos, los workflows se pausan hasta el día 1 del siguiente mes. No hay cargo adicional.
-
-### Supabase — 500 MB de almacenamiento incluidos
-
-| Concepto | Valor |
-|----------|-------|
-| Estaciones activas | ~677 |
-| Snapshots por día (solo horario operativo) | ~2,600 |
-| Tamaño estimado por fila | ~100 bytes |
-| **Crecimiento mensual** | **~8 MB/mes** |
-| **Capacidad gratuita** | **500 MB** |
-| **Meses antes de llegar al límite** | **~60 meses** |
-
-> Nota: la estimación de 100 bytes por fila es conservadora. PostgreSQL con índices puede consumir más por overhead de página, pero el margen sigue siendo amplio.
-
-Cuando quieras liberar espacio manualmente:
-
-```sql
--- Eliminar snapshots con más de 90 días
-DELETE FROM snapshots WHERE collected_at < NOW() - INTERVAL '90 days';
+```
+cron: "*/15 * * * *"  (cada 15 min, sujeto a variabilidad de GitHub)
 ```
 
-### Streamlit Community Cloud — gratuito sin límite de tiempo
-
-El dashboard no consume minutos de Actions ni almacenamiento de Supabase. Corre en los servidores de Streamlit y se redespliegua automáticamente con cada push a `main`.
+Funciona como respaldo. Si Google Cloud Scheduler falla, GitHub Actions intenta la misma recolección. La restricción de unicidad en la DB evita duplicados.
 
 ---
 
 ## ¿Por qué Supabase?
 
-Para este pipeline necesitábamos una base de datos PostgreSQL accesible desde GitHub Actions (nube → nube), gratuita durante la fase de recolección, y que no requiriera administración de servidores. Supabase cumple todo eso.
+Para este pipeline necesitábamos una base de datos PostgreSQL accesible desde la nube (tanto GCP como GitHub Actions), gratuita durante la fase de recolección, y que no requiriera administración de servidores. Supabase cumple todo eso.
 
 ### Alternativas consideradas
 
@@ -209,19 +240,15 @@ Para este pipeline necesitábamos una base de datos PostgreSQL accesible desde G
 | **Google Sheets** | API lenta, sin soporte real para SQL, difícil de escalar |
 | **PlanetScale / Turso** | No son PostgreSQL nativo; requieren adaptadores extra |
 | **Railway / Render DB** | Plan gratuito muy limitado en horas de cómputo |
-| **AWS RDS / GCP Cloud SQL** | Excelentes, pero tienen costo desde el día 1 |
+| **GCP Cloud SQL** | Excelente, pero tiene costo desde el día 1 (~$7/mes mínimo) |
 
 ### Ventajas concretas de Supabase en este proyecto
 
-- **PostgreSQL completo**: podemos escribir SQL arbitrario, usar `ON CONFLICT`, índices, vistas y triggers — exactamente lo que usa el schema.
+- **PostgreSQL completo**: SQL arbitrario, `ON CONFLICT`, índices, vistas y triggers.
 - **Acceso directo por connection string**: `psycopg2` se conecta igual que a cualquier Postgres. Sin SDK propietario.
-- **Plan gratuito generoso**: 500 MB de almacenamiento, suficiente para meses de snapshots (~1 KB por fila × 280 estaciones × 96 snapshots/día ≈ **27 MB/mes**).
+- **Plan gratuito generoso**: 500 MB de almacenamiento, suficiente para años de snapshots.
 - **Sin servidor que mantener**: se paga con tiempo de setup, no con dinero ni con ops.
-- **Pausa automática mitigada**: el workflow `keepalive.yml` hace un ping cada 3 días para evitar que Supabase pause el proyecto por inactividad (comportamiento del free tier).
-
-### Cuándo Supabase dejaría de ser suficiente
-
-Si el proyecto escala a recolección por segundo, o si se necesita más de 500 MB de datos históricos, la migración natural sería a una instancia de PostgreSQL dedicada (Railway Pro, Neon, o RDS). El código no cambiaría — solo la connection string.
+- **Accesible desde cualquier nube**: tanto GCP (Cloud Run) como GitHub Actions se conectan con la misma connection string.
 
 ---
 
@@ -229,14 +256,60 @@ Si el proyecto escala a recolección por segundo, o si se necesita más de 500 M
 
 El intervalo de recolección es un balance entre **granularidad estadística** y **costo operativo**.
 
-| Intervalo | Runs/mes | Minutos Actions/mes | Filas/mes (280 estaciones) | ¿Viable en free? |
-|-----------|----------|---------------------|-----------------------------|------------------|
-| 5 min | 8,640 | ~8,640 | ~2.4 M | No (límite: 2,000 min) |
-| 10 min | 4,320 | ~4,320 | ~1.2 M | Ajustado |
-| **15 min** | **2,880** | **~2,880** | **~807 K** | **Sí** |
-| 30 min | 1,440 | ~1,440 | ~403 K | Sí, pero pierde granularidad hora punta |
+| Intervalo | Runs/mes | Filas/mes (677 estaciones) | Notas |
+|-----------|----------|----------------------------|-------|
+| 5 min | 8,640 | ~5.8 M | Excesivo para patrones horarios |
+| 10 min | 4,320 | ~2.9 M | Viable pero sin beneficio real vs 15 |
+| **15 min** | **2,880** | **~1.9 M** | **Balance óptimo** |
+| 30 min | 1,440 | ~975 K | Pierde granularidad en hora punta |
 
-Además, los patrones de disponibilidad de bicicletas son fenómenos de escala horaria (hora punta mañana, mediodía, tarde), no de escala de segundos. Una granularidad de 15 minutos captura con fidelidad suficiente la variación intradiaria que el modelo necesita aprender.
+Los patrones de disponibilidad de bicicletas son fenómenos de escala horaria (hora punta mañana, mediodía, tarde), no de escala de segundos. Una granularidad de 15 minutos captura con fidelidad suficiente la variación intradiaria que el modelo necesita aprender.
+
+---
+
+## Costos y límites gratuitos
+
+El proyecto está diseñado para correr **completamente gratis** o con un costo mínimo.
+
+### Google Cloud Platform
+
+| Servicio | Uso mensual | Free tier | Costo real |
+|----------|-------------|-----------|------------|
+| Cloud Scheduler | ~2,880 invocaciones | 3 jobs gratis | $0 |
+| Cloud Run | ~2,880 requests × ~5s | 2M requests + 360K vCPU-s gratis | $0 |
+| Cloud Build | Build inicial + redeploys | 120 min/día gratis | $0 |
+| **Total GCP** | | | **$0** |
+
+### GitHub Actions — 2,000 min/mes (se renuevan el 1° de cada mes)
+
+| Workflow | Runs/mes | Min/run | Min/mes |
+|----------|----------|---------|---------|
+| `collect.yml` backup (en horario operativo) | ~2,340 | ~0.5 | ~1,170 |
+| `collect.yml` fuera de horario (salida rápida) | ~540 | ~0.05 | ~27 |
+| `train.yml` semanal | ~4 | ~5 | ~20 |
+| `keepalive.yml` cada 3 días | ~10 | ~0.3 | ~3 |
+| **Total** | | | **~1,220 de 2,000** |
+
+> Si en algún mes se agotan los minutos, los workflows se pausan hasta el día 1 del siguiente mes. No hay cargo adicional. La recolección principal (GCP) no se ve afectada.
+
+### Supabase — 500 MB incluidos
+
+| Concepto | Valor |
+|----------|-------|
+| Estaciones activas | ~677 |
+| Snapshots por día (horario operativo) | ~2,600 |
+| Crecimiento mensual | ~8 MB/mes |
+| **Meses antes de llegar al límite** | **~60** |
+
+Cuando quieras liberar espacio:
+
+```sql
+DELETE FROM snapshots WHERE collected_at < NOW() - INTERVAL '90 days';
+```
+
+### Streamlit Community Cloud — gratuito
+
+El dashboard corre en los servidores de Streamlit y se redespliegua automáticamente con cada push a `main`. Sin costo.
 
 ---
 
@@ -266,9 +339,13 @@ La codificación cíclica con seno/coseno es importante: le dice al modelo que l
 | `learning_rate` | 0.05 | Conservador; mejor generalización |
 | Métrica | AUC-ROC | Adecuada para clasificación binaria con posible desbalance de clases |
 
+### Horario operativo
+
+El entrenamiento **filtra automáticamente** los snapshots fuera del horario operativo de EcoBici (00:30–05:00 CDMX). Esto evita que el modelo aprenda que "no hay bicis" cuando en realidad el sistema estaba cerrado.
+
 ### Reentrenamiento
 
-El modelo se reentrena **cada domingo a las 3am UTC** usando todos los snapshots acumulados. Cada versión se publica como un GitHub Release con el archivo `.pkl`, lo que permite comparar el desempeño semana a semana.
+El modelo se reentrena **cada domingo a las 3am UTC** vía GitHub Actions. Cada versión se publica como GitHub Release con el archivo `.pkl`.
 
 ---
 
@@ -280,50 +357,73 @@ El modelo se reentrena **cada domingo a las 3am UTC** usando todos los snapshots
 2. Ve a **SQL Editor** en el menú lateral
 3. Copia y ejecuta el contenido de [`docs/supabase_setup.sql`](docs/supabase_setup.sql)
 
-Esto crea las tablas `station_info` y `snapshots`, sus índices y una vista `snapshots_view` para exploración.
+Esto crea las tablas `station_info` y `snapshots` (con columnas `bikes_disabled`, `docks_disabled`, `origin`), índices y la vista `snapshots_view`.
 
 ### 2. Obtener la connection string
 
-En tu proyecto de Supabase: `Project Settings → Database → Connection string`
-
-Selecciona el modo **Session** y copia la URL. Tendrá este formato:
+En tu proyecto de Supabase: **Connect → Connection String → Transaction pooler**
 
 ```
-postgresql://postgres.[ref]:[password]@aws-0-us-east-1.pooler.supabase.com:5432/postgres
+postgresql://postgres.[ref]:[password]@aws-0-us-east-1.pooler.supabase.com:6543/postgres
 ```
 
-### 3. Agregar el secret en GitHub
+> Usar **Transaction pooler** (puerto 6543), no la conexión directa (5432), para compatibilidad con Cloud Run y GitHub Actions.
+
+### 3. Desplegar en Google Cloud
+
+```bash
+# Autenticarse
+gcloud auth login
+gcloud config set project TU_PROJECT_ID
+
+# Configurar la variable de entorno en Cloud Run
+gcloud run deploy ecobici-collector \
+  --set-env-vars="SUPABASE_DB_URL=postgresql://..." \
+  --region=us-central1
+
+# Crear el Cloud Scheduler job
+gcloud scheduler jobs create http ecobici-collect \
+  --schedule="*/15 * * * *" \
+  --uri="https://ecobici-collector-XXXX.run.app" \
+  --http-method=POST \
+  --oidc-service-account-email=TU_SERVICE_ACCOUNT
+```
+
+El `cloudbuild.yaml` incluido construye el contenedor con buildpacks y lo despliega en Cloud Run automáticamente.
+
+### 4. Agregar el secret en GitHub
 
 En tu repositorio: `Settings → Secrets and variables → Actions → New repository secret`
 
 | Nombre | Valor |
 |--------|-------|
-| `SUPABASE_DB_URL` | La connection string del paso anterior |
+| `SUPABASE_DB_URL` | La connection string del paso 2 |
 
-### 4. Activar workflows
+### 5. Verificar
 
-Los workflows se activan automáticamente al hacer push a `main`. Para probar de inmediato:
+```sql
+-- En Supabase SQL Editor
+SELECT origin, COUNT(*), MIN(collected_at), MAX(collected_at)
+FROM snapshots
+GROUP BY origin;
+```
 
-1. Ve a la pestaña **Actions** de tu repo
-2. Selecciona **"Recolectar Snapshots EcoBici"**
-3. Haz clic en **"Run workflow"**
-4. Verifica en Supabase que hay datos en `station_info` y `snapshots`
+Deberías ver filas con `origin = 'google-cloud'` y/o `origin = 'github-actions'`.
 
 ---
 
 ## Uso del CLI de predicción
 
-Requiere tener `ecobici_model.pkl` descargado desde los GitHub Releases, y `SUPABASE_DB_URL` en el entorno.
+Requiere tener `ecobici_model.pkl` descargado desde los GitHub Releases y `SUPABASE_DB_URL` en el entorno.
 
 ```bash
 # Instalar dependencias
 pip install -r requirements.txt
 
 # Predicción para una estación específica
-# Estación 059, Lunes (0) a las 8am
-python src/predict.py --station 059 --hour 8 --dow 0
+python src/predict.py --station 059 --hour 8 --dow 0   # Lunes 8am, estación 059
 
-# Reporte en tiempo real de todas las estaciones (usa el API + el modelo)
+# Reporte en tiempo real de todas las estaciones
 python src/predict.py --report
 ```
 
@@ -333,20 +433,56 @@ python src/predict.py --report
 
 | Indicador | Rango | Significado |
 |-----------|-------|-------------|
-| Alta probabilidad | ≥ 70% | Es muy probable encontrar bici |
+| Alta probabilidad | >= 70% | Es muy probable encontrar bici |
 | Probabilidad moderada | 40–70% | Puede haber bici, no es seguro |
 | Baja probabilidad | < 40% | Poco probable encontrar bici |
 
 ---
 
+## Dashboard
+
+El proyecto incluye un dashboard en Streamlit desplegado en [Streamlit Community Cloud](https://share.streamlit.io).
+
+**Secciones:**
+- Métricas principales: registros totales, estaciones, disponibilidad media, % bicis descompuestas
+- Estado del pipeline: últimas 6 ejecuciones de `collect.yml` con status en tiempo real
+- EDA de disponibilidad: histograma, barras por hora, heatmap hora x día, top/bottom estaciones
+- Análisis de bicis descompuestas: timeline, ranking por estación
+
+**Despliegue:**
+1. Ve a [share.streamlit.io](https://share.streamlit.io)
+2. Selecciona el repo `jmtoral/ecobici-collector`
+3. Main file: `app/app.py`
+4. En Secrets agrega: `SUPABASE_DB_URL = "postgresql://..."`
+
+---
+
 ## Dependencias
 
-Ver [`requirements.txt`](requirements.txt).
+### Collector (`src/requirements.txt`) — se ejecuta en Cloud Run
 
 | Paquete | Uso |
 |---------|-----|
+| `requests` | Llamadas al API GBFS |
 | `psycopg2-binary` | Conexión a Supabase/PostgreSQL |
-| `requests` | Llamadas al API GBFS de EcoBici |
+| `functions-framework` | Runtime HTTP para Cloud Functions/Run |
+
+### Entrenamiento y predicción (`requirements.txt`)
+
+| Paquete | Uso |
+|---------|-----|
 | `pandas` | Manipulación de datos tabulares |
 | `numpy` | Transformaciones matemáticas (seno/coseno cíclico) |
 | `scikit-learn` | Modelo de clasificación y métricas |
+| `psycopg2-binary` | Conexión a Supabase |
+| `requests` | API GBFS |
+
+### Dashboard (`requirements_app.txt`)
+
+| Paquete | Uso |
+|---------|-----|
+| `streamlit` | Framework del dashboard |
+| `plotly` | Gráficas interactivas |
+| `psycopg2-binary` | Conexión a Supabase |
+| `pandas` | Datos tabulares |
+| `requests` | GitHub API (estado del pipeline) |
