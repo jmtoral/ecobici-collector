@@ -423,8 +423,11 @@ if selected:
         margin = (z * np.sqrt(p * (1 - p) / total + z**2 / (4 * total**2))) / denom
         return float(np.clip(center - margin, 0, 1)), float(np.clip(center + margin, 0, 1))
 
+    # Excluir horas de no operación (01:00–04:59 CDMX)
+    df_st_op = df_st[~df_st["hour"].isin([1, 2, 3, 4])]
+
     hourly_ci = (
-        df_st.groupby("hour")["disponible"]
+        df_st_op.groupby("hour")["disponible"]
         .agg(["sum", "count"])
         .reset_index()
         .rename(columns={"sum": "exitos", "count": "total"})
@@ -479,8 +482,10 @@ if selected:
             title="P(≥1 bici)",
         ),
         xaxis=dict(
-            range=[0, 23], fixedrange=True,
-            tickmode="linear", tick0=0, dtick=1, title="Hora del día",
+            fixedrange=True,
+            tickmode="array",
+            tickvals=[0, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23],
+            title="Hora del día",
         ),
         legend=dict(orientation="h", y=1.08),
     )
