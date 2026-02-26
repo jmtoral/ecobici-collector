@@ -44,7 +44,12 @@ flowchart TD
 
     subgraph GCP["Google Cloud Platform"]
         SCH["Cloud Scheduler\ncada 15 min"]
-        CR["Cloud Run\necobici-collector"]
+    end
+
+    subgraph SB["Supabase"]
+        EF["Edge Function\nrun_collector()"]
+        SI["station_info\nnombre, capacidad, lat/lon"]
+        SN["snapshots\nbikes_available, bikes_disabled\norigin: google-cloud | github-actions"]
     end
 
     subgraph GHA["GitHub Actions"]
@@ -54,21 +59,19 @@ flowchart TD
     end
 
     subgraph SRC["src/"]
-        MAIN["main.py\nrun_collector()"]
+        MAIN["main.py"]
         TRN["train.py"]
         PRD["predict.py"]
-    end
-
-    subgraph DB["Supabase (PostgreSQL)"]
-        SI["station_info\nnombre, capacidad, lat/lon"]
-        SN["snapshots\nbikes_available, bikes_disabled\norigin: google-cloud | github-actions"]
     end
 
     PKL["ecobici_model.pkl\nGitHub Release"]
     DASH["Dashboard\nStreamlit Cloud"]
 
-    SCH -->|"HTTP POST"| CR
-    CR -->|"ejecuta"| MAIN
+    SCH -->|"HTTP POST"| EF
+    EF -->|"GET"| API
+    EF -->|"INSERT"| SN
+    EF -->|"UPSERT"| SI
+
     WC -->|"ejecuta"| MAIN
     MAIN -->|"GET"| API
     MAIN -->|"INSERT"| SN
@@ -96,11 +99,10 @@ flowchart TD
 ```
 ecobici-collector/
 ├── src/
-│   ├── main.py            # Collector: Cloud Functions + GitHub Actions (dual trigger)
+│   ├── main.py            # Collector: dual trigger (GCP Scheduler + GitHub Actions)
 │   ├── train.py           # Entrenamiento semanal del modelo
 │   ├── predict.py         # CLI: predicción por estación o reporte completo
-│   ├── requirements.txt   # Dependencias del collector (Cloud Functions)
-│   └── Procfile           # Entrypoint para functions-framework
+│   └── requirements.txt   # Dependencias del collector
 ├── app/
 │   └── app.py             # Dashboard Streamlit con EDA y monitoreo
 ├── .github/
@@ -110,7 +112,6 @@ ecobici-collector/
 │       └── keepalive.yml  # Ping Supabase: cada 3 días
 ├── docs/
 │   └── supabase_setup.sql # Schema completo: tablas, índices, vista
-├── cloudbuild.yaml        # Pipeline de Cloud Build (buildpacks → Cloud Run)
 ├── requirements.txt       # Dependencias generales (ML, dashboard)
 ├── requirements_app.txt   # Dependencias de Streamlit
 ├── .gitignore
@@ -134,17 +135,19 @@ GitHub Actions ejecuta workflows con schedule (`cron`) en una cola compartida en
 
 Para un pipeline de recolección de datos que necesita consistencia temporal, esta variabilidad era inaceptable.
 
-### La solución: Google Cloud Scheduler + Cloud Run
+### La solución: Google Cloud Scheduler + Supabase
 
-Google Cloud Scheduler es un servicio de cron gestionado con **precisión de segundos**. La migración fue:
+Google Cloud Scheduler es un servicio de cron gestionado con **precisión de segundos**. La arquitectura final es simple: Cloud Scheduler envía un HTTP POST cada 15 minutos a una función en Supabase que ejecuta la recolección.
 
-| Componente | Antes (GitHub Actions) | Ahora (Google Cloud) |
+Se intentó inicialmente usar Cloud Build + Cloud Run como runtime, pero la complejidad del pipeline de build (buildpacks, contenedores, service accounts) no justificaba el beneficio para una función que tarda ~5 segundos. La solución final es más limpia: el scheduler llama directamente a Supabase.
+
+| Componente | Antes (GitHub Actions) | Ahora (Google Cloud + Supabase) |
 |---|---|---|
 | Scheduler | `cron: "*/15 * * * *"` en `.yml` | Google Cloud Scheduler (HTTP) |
-| Runtime | Runner efímero Ubuntu | Cloud Run (contenedor permanente) |
-| Build | N/A | Cloud Build con buildpacks |
+| Runtime | Runner efímero Ubuntu | Supabase |
+| Build pipeline | N/A | N/A (sin contenedores) |
 | Precisión | ±5-30 min | ±1 segundo |
-| Costo | Gratis (2,000 min/mes) | ~$0 (free tier de GCP) |
+| Costo | Gratis (2,000 min/mes) | ~$0 (free tier de ambos) |
 
 ### Cómo funciona el dual trigger
 
@@ -183,11 +186,11 @@ GitHub Actions sigue siendo útil para:
 
 ```
 Frecuencia: */15 * * * *  (cada 15 minutos)
-Objetivo:   HTTP POST → Cloud Run (ecobici-collector)
+Objetivo:   HTTP POST → Supabase (función de recolección)
 Precisión:  < 1 segundo de desviación
 ```
 
-El Cloud Scheduler envía un request HTTP al contenedor en Cloud Run. El contenedor ejecuta `run_collector()`, que:
+El Cloud Scheduler envía un request HTTP que ejecuta la recolección. La función:
 
 1. Detecta el origen del request (Google Cloud Scheduler)
 2. Verifica si está dentro del horario operativo (05:00–00:30 CDMX)
@@ -248,7 +251,7 @@ Para este pipeline necesitábamos una base de datos PostgreSQL accesible desde l
 - **Acceso directo por connection string**: `psycopg2` se conecta igual que a cualquier Postgres. Sin SDK propietario.
 - **Plan gratuito generoso**: 500 MB de almacenamiento, suficiente para años de snapshots.
 - **Sin servidor que mantener**: se paga con tiempo de setup, no con dinero ni con ops.
-- **Accesible desde cualquier nube**: tanto GCP (Cloud Run) como GitHub Actions se conectan con la misma connection string.
+- **Accesible desde cualquier nube**: tanto GCP como GitHub Actions se conectan con la misma connection string.
 
 ---
 
@@ -276,8 +279,6 @@ El proyecto está diseñado para correr **completamente gratis** o con un costo 
 | Servicio | Uso mensual | Free tier | Costo real |
 |----------|-------------|-----------|------------|
 | Cloud Scheduler | ~2,880 invocaciones | 3 jobs gratis | $0 |
-| Cloud Run | ~2,880 requests × ~5s | 2M requests + 360K vCPU-s gratis | $0 |
-| Cloud Build | Build inicial + redeploys | 120 min/día gratis | $0 |
 | **Total GCP** | | | **$0** |
 
 ### GitHub Actions — 2,000 min/mes (se renuevan el 1° de cada mes)
@@ -367,29 +368,24 @@ En tu proyecto de Supabase: **Connect → Connection String → Transaction pool
 postgresql://postgres.[ref]:[password]@aws-0-us-east-1.pooler.supabase.com:6543/postgres
 ```
 
-> Usar **Transaction pooler** (puerto 6543), no la conexión directa (5432), para compatibilidad con Cloud Run y GitHub Actions.
+> Usar **Transaction pooler** (puerto 6543), no la conexión directa (5432), para compatibilidad con servicios externos (GCP, GitHub Actions, Streamlit).
 
-### 3. Desplegar en Google Cloud
+### 3. Configurar Google Cloud Scheduler
 
 ```bash
 # Autenticarse
 gcloud auth login
 gcloud config set project TU_PROJECT_ID
 
-# Configurar la variable de entorno en Cloud Run
-gcloud run deploy ecobici-collector \
-  --set-env-vars="SUPABASE_DB_URL=postgresql://..." \
-  --region=us-central1
-
-# Crear el Cloud Scheduler job
+# Crear el job del scheduler
 gcloud scheduler jobs create http ecobici-collect \
   --schedule="*/15 * * * *" \
-  --uri="https://ecobici-collector-XXXX.run.app" \
+  --uri="URL_DE_TU_FUNCION_SUPABASE" \
   --http-method=POST \
-  --oidc-service-account-email=TU_SERVICE_ACCOUNT
+  --time-zone="America/Mexico_City"
 ```
 
-El `cloudbuild.yaml` incluido construye el contenedor con buildpacks y lo despliega en Cloud Run automáticamente.
+El scheduler enviará un HTTP POST cada 15 minutos. La función de recolección se encarga del resto.
 
 ### 4. Agregar el secret en GitHub
 
@@ -459,13 +455,13 @@ El proyecto incluye un dashboard en Streamlit desplegado en [Streamlit Community
 
 ## Dependencias
 
-### Collector (`src/requirements.txt`) — se ejecuta en Cloud Run
+### Collector (`src/requirements.txt`)
 
 | Paquete | Uso |
 |---------|-----|
 | `requests` | Llamadas al API GBFS |
 | `psycopg2-binary` | Conexión a Supabase/PostgreSQL |
-| `functions-framework` | Runtime HTTP para Cloud Functions/Run |
+| `functions-framework` | Runtime HTTP para invocaciones vía scheduler |
 
 ### Entrenamiento y predicción (`requirements.txt`)
 
