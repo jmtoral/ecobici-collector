@@ -7,18 +7,20 @@ Pipeline automatizado para recolectar datos de disponibilidad de bicicletas en *
 ## Tabla de contenidos
 
 1. [¿Qué hace este proyecto?](#qué-hace-este-proyecto)
-2. [Arquitectura](#arquitectura)
-3. [Estructura del proyecto](#estructura-del-proyecto)
-4. [¿Por qué Google Cloud en vez de GitHub Actions?](#por-qué-google-cloud-en-vez-de-github-actions)
-5. [Scheduling y cron](#scheduling-y-cron)
-6. [¿Por qué Supabase?](#por-qué-supabase)
-7. [¿Por qué 15 minutos?](#por-qué-15-minutos)
-8. [Costos y límites gratuitos](#costos-y-límites-gratuitos)
-9. [El modelo](#el-modelo)
-10. [Setup paso a paso](#setup-paso-a-paso)
-11. [Uso del CLI de predicción](#uso-del-cli-de-predicción)
-12. [Dashboard](#dashboard)
-13. [Dependencias](#dependencias)
+2. [SIPOC](#sipoc)
+3. [Inventario de servicios](#inventario-de-servicios)
+4. [Arquitectura](#arquitectura)
+5. [Estructura del proyecto](#estructura-del-proyecto)
+6. [¿Por qué Google Cloud en vez de GitHub Actions?](#por-qué-google-cloud-en-vez-de-github-actions)
+7. [Scheduling y cron](#scheduling-y-cron)
+8. [¿Por qué Supabase?](#por-qué-supabase)
+9. [¿Por qué 15 minutos?](#por-qué-15-minutos)
+10. [Costos y límites gratuitos](#costos-y-límites-gratuitos)
+11. [El modelo](#el-modelo)
+12. [Setup paso a paso](#setup-paso-a-paso)
+13. [Uso del CLI de predicción](#uso-del-cli-de-predicción)
+14. [Dashboard](#dashboard)
+15. [Dependencias](#dependencias)
 
 ---
 
@@ -33,6 +35,39 @@ Este proyecto:
 3. **Predice** la probabilidad de que una estación tenga al menos una bici disponible, dado el día de la semana y la hora.
 
 La pregunta que responde el modelo es simple: _"Si voy a la estación X un martes a las 8am, ¿qué tan probable es que haya bici?"_
+
+---
+
+## SIPOC
+
+El SIPOC describe el flujo completo del pipeline desde la fuente de datos hasta el usuario final.
+
+| **S**uppliers | **I**nputs | **P**rocess | **O**utputs | **C**ustomers |
+|---------------|------------|-------------|-------------|---------------|
+| EcoBici / Lyft | Feed GBFS (JSON) con estado en tiempo real de 677 estaciones | **Recolección** (cada 15 min): `src/main.py` descarga el feed y persiste en Supabase | Tabla `snapshots`: 1 fila por estación por recolección | Pipeline de entrenamiento |
+| Google Cloud Scheduler | HTTP POST cada 15 min | **Persistencia**: `INSERT INTO snapshots … ON CONFLICT DO NOTHING` | Tabla `station_info`: nombre, capacidad, lat/lon de cada estación | Dashboard |
+| GitHub Actions | Secrets: `SUPABASE_DB_URL` | **Entrenamiento** (semanal): `src/train.py` lee snapshots, construye features, entrena GradientBoosting | `ecobici_model.pkl` publicado como GitHub Release | CLI de predicción |
+| Supabase (PostgreSQL) | Snapshots acumulados (~1.9 M filas/mes) | **Predicción** (on-demand): `src/predict.py` carga el modelo y el estado actual del API | Reporte de probabilidades por estación | Usuario final |
+| Mapbox (tiles) | Token de API | **Visualización**: `app/app.py` lee Supabase y renderiza dashboard | Dashboard interactivo en Streamlit Cloud | Usuario final |
+
+---
+
+## Inventario de servicios
+
+Todos los servicios utilizados, su rol, tier de uso y costo estimado.
+
+| Servicio | Rol | Tier | Costo mensual |
+|----------|-----|------|---------------|
+| **EcoBici GBFS API** | Fuente de datos de disponibilidad en tiempo real | Público, sin auth | $0 |
+| **Google Cloud Scheduler** | Disparo preciso del collector cada 15 min | Free tier (3 jobs gratis) | $0 |
+| **Supabase** | Base de datos PostgreSQL: almacena snapshots y station_info | Free tier (500 MB) | $0 |
+| **GitHub Actions** | Entrenamiento semanal, keepalive de Supabase, backup del collector | Free tier (2,000 min/mes) | $0 |
+| **GitHub Releases** | Almacenamiento del modelo `.pkl` versionado | Incluido en GitHub Free | $0 |
+| **Streamlit Community Cloud** | Hosting del dashboard público | Free tier | $0 |
+| **Mapbox** | Tiles de mapa base para la visualización H3 | Free tier (50,000 loads/mes) | $0 |
+| **Total** | | | **$0** |
+
+> Los límites del plan gratuito de cada servicio se detallan en la sección [Costos y límites gratuitos](#costos-y-límites-gratuitos).
 
 ---
 
@@ -440,16 +475,37 @@ python src/predict.py --report
 El proyecto incluye un dashboard en Streamlit desplegado en [Streamlit Community Cloud](https://share.streamlit.io).
 
 **Secciones:**
-- Métricas principales: registros totales, estaciones, disponibilidad media, % bicis descompuestas
-- Estado del pipeline: últimas 6 ejecuciones de `collect.yml` con status en tiempo real
-- EDA de disponibilidad: histograma, barras por hora, heatmap hora x día, top/bottom estaciones
-- Análisis de bicis descompuestas: timeline, ranking por estación
+- **Métricas principales**: registros totales, estaciones activas, recolecciones, disponibilidad media, % bicis descompuestas
+- **Estado del pipeline**: últimas 6 ejecuciones de `collect.yml` · indicador de salud del Google Cloud Scheduler (verde/amarillo/rojo según minutos desde la última recolección) · recolecciones por origen (Google Cloud / GitHub Actions / Manual) con gráfica histórica stacked por día
+- **EDA de disponibilidad**: histograma de bicis por snapshot, tasa de disponibilidad por hora, heatmap hora × día de semana, top/bottom 15 estaciones
+- **Explorador por estación**: búsqueda por nombre, métricas individuales, timeline de evolución, curva de probabilidad P(≥1 bici) suavizada con LOWESS + intervalo de confianza Wilson 95%
+- **Mapa H3**: visualización geoespacial de disponibilidad promedio por hexágono, filtrable por hora del día
+- **Análisis de bicis descompuestas**: timeline, ranking absoluto y por porcentaje de flota
+
+### Mapa de disponibilidad H3
+
+El dashboard incluye un mapa de calor hexagonal construido con [H3](https://h3geo.org/) (sistema de indexación geoespacial de Uber) y [pydeck](https://deckgl.readthedocs.io/).
+
+**Cómo funciona:**
+1. Cada estación tiene coordenadas `lat/lon` almacenadas en `station_info`
+2. Se calcula `P(≥1 bici)` por estación para la hora seleccionada
+3. Cada estación se asigna a un hexágono H3 de resolución 9 (~170 m de diámetro)
+4. Los hexágonos se colorean en escala RdYlGn: rojo = baja disponibilidad, verde = alta
+5. El hover muestra número de estaciones en el hexágono, disponibilidad, bicis promedio y descompuestas
+
+> **Nota metodológica**: se excluyen del mapa las estaciones que históricamente tienen 0% de disponibilidad a la hora seleccionada. Estas estaciones suelen estar fuera de servicio o tener datos incompletos, y su inclusión distorsionaría el mapa hacia zonas artificialmente rojas.
+
+**Requisito adicional**: token de Mapbox (gratuito en [account.mapbox.com](https://account.mapbox.com)) guardado como secret `MAPBOX_TOKEN` en Streamlit Cloud.
 
 **Despliegue:**
 1. Ve a [share.streamlit.io](https://share.streamlit.io)
 2. Selecciona el repo `jmtoral/ecobici-collector`
 3. Main file: `app/app.py`
-4. En Secrets agrega: `SUPABASE_DB_URL = "postgresql://..."`
+4. En Secrets agrega:
+```toml
+SUPABASE_DB_URL = "postgresql://..."
+MAPBOX_TOKEN    = "pk.eyJ1..."
+```
 
 ---
 

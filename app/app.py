@@ -506,9 +506,20 @@ import pydeck as pdk
 
 mapbox_token = st.secrets.get("MAPBOX_TOKEN") or os.environ.get("MAPBOX_TOKEN", "")
 
-# Disponibilidad y coordenadas por estación
+# Filtro de hora del día
+hora_col, _ = st.columns([1, 3])
+with hora_col:
+    hora_mapa = st.select_slider(
+        "Hora del día",
+        options=list(range(24)),
+        value=8,
+        format_func=lambda h: f"{h:02d}:00",
+    )
+
+# Disponibilidad y coordenadas por estación filtrada por hora
+df_hora = df[df["hour"] == hora_mapa]
 station_map = (
-    df.dropna(subset=["lat", "lon"])
+    df_hora.dropna(subset=["lat", "lon"])
     .groupby(["station_id", "station_name", "lat", "lon"])
     .agg(
         p_disponible=("disponible", "mean"),
@@ -517,17 +528,14 @@ station_map = (
         avg_disabled=("bikes_disabled", "mean"),
     )
     .reset_index()
-    .query("n_obs >= 5")
+    .query("n_obs >= 2 and p_disponible > 0")  # excluir estaciones con 0% de disponibilidad
 )
+# Nota: se excluyen estaciones con disponibilidad histórica del 0% a esta hora,
+# ya que suelen indicar estaciones fuera de servicio o con datos incompletos,
+# no zonas genuinamente sin bicis.
 
-res_col, _ = st.columns([1, 3])
-with res_col:
-    resolution = st.select_slider(
-        "Resolución H3",
-        options=[7, 8, 9],
-        value=8,
-        format_func=lambda r: {7: "7 · colonias (~1.2 km)", 8: "8 · barrios (~460 m)", 9: "9 · manzanas (~170 m)"}[r],
-    )
+# Resolución fija en 9 (manzanas ~170m) para máxima granularidad
+resolution = 9
 
 # Asignar hexágono H3 a cada estación
 station_map["h3_cell"] = station_map.apply(
@@ -591,7 +599,7 @@ st.pydeck_chart(
     ),
     height=500,
 )
-st.caption("Color: verde = alta disponibilidad · rojo = baja disponibilidad · hover para detalles por hexágono")
+st.caption(f"Hora seleccionada: {hora_mapa:02d}:00 · Resolución H3-9 (~170 m) · Color: verde = alta disponibilidad · rojo = baja · hover para detalles")
 
 st.divider()
 
