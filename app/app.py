@@ -511,7 +511,7 @@ hora_col, _ = st.columns([1, 3])
 with hora_col:
     hora_mapa = st.select_slider(
         "Hora del día",
-        options=list(range(24)),
+        options=list(range(5, 24)) + [0],
         value=8,
         format_func=lambda h: f"{h:02d}:00",
     )
