@@ -69,9 +69,9 @@ def load_data() -> pd.DataFrame:
     df["bikes_total"]    = df["bikes_available"] + df["bikes_disabled"]
     df["disabled_ratio"] = df["bikes_disabled"] / df["bikes_total"].replace(0, pd.NA)
 
-    # Filtrar horario fuera de operación EcoBici: 00:30–05:00 CDMX
+    # Filtrar horario fuera de operación EcoBici: 00:30–05:15 CDMX (API inestable al inicio)
     minutes = df["hour"] * 60 + df["collected_at"].dt.minute
-    df = df[~((minutes >= 30) & (minutes < 300))].copy()
+    df = df[~((minutes >= 30) & (minutes < 315))].copy()
     return df
 
 
@@ -213,7 +213,7 @@ if not gc_data.empty and in_operating_hours:
     else:
         st.error(f"🔴 **Scheduler sin respuesta** — última recolección hace {ago_min:.0f} min ({last_gc.strftime('%d/%m %H:%M')})")
 elif not in_operating_hours:
-    st.info("🌙 **Fuera de horario operativo** (00:30–05:00 CDMX) — el Scheduler no recolecta en este horario")
+    st.info("🌙 **Fuera de horario operativo** (00:30–05:15 CDMX) — el Scheduler no recolecta en este horario")
 
 # Gráfica de recolecciones por origen a lo largo del tiempo
 if n_colectas > 1:
