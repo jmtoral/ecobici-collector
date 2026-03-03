@@ -411,10 +411,9 @@ if selected:
     fig_st.update_layout(margin=dict(t=5, b=5), height=350, legend=dict(orientation="h", y=1.05))
     st.plotly_chart(fig_st, use_container_width=True)
 
-    # Curva de probabilidad suavizada por hora con intervalo de confianza (Wilson)
-    st.markdown(f"**Curva de probabilidad P(≥1 bici) por hora — {sel_name}**")
     import numpy as np
     from statsmodels.nonparametric.smoothers_lowess import lowess
+    import plotly.graph_objects as go
 
     def wilson_ci(successes, total, z=1.96):
         if total == 0:
@@ -428,71 +427,146 @@ if selected:
     # Excluir horas de no operación (01:00–04:59 CDMX)
     df_st_op = df_st[~df_st["hour"].isin([1, 2, 3, 4])]
 
-    hourly_ci = (
-        df_st_op.groupby("hour")["disponible"]
-        .agg(["sum", "count"])
-        .reset_index()
-        .rename(columns={"sum": "exitos", "count": "total"})
-    )
-    hourly_ci["p"]       = hourly_ci["exitos"] / hourly_ci["total"]
-    hourly_ci["ci_low"]  = hourly_ci.apply(lambda r: wilson_ci(r.exitos, r.total)[0], axis=1)
-    hourly_ci["ci_high"] = hourly_ci.apply(lambda r: wilson_ci(r.exitos, r.total)[1], axis=1)
+    tab_hr, tab_day = st.tabs(["Curva por hora", "Curva por día de la semana"])
 
-    # Suavizado LOWESS sobre los puntos por hora (frac controla cuánto suaviza)
-    smoothed = lowess(hourly_ci["p"], hourly_ci["hour"], frac=0.35, return_sorted=True)
-    hourly_ci["p_smooth"] = np.clip(smoothed[:, 1], 0, 1)
+    with tab_hr:
+        st.markdown(f"**Curva de probabilidad P(≥1 bici) por hora — {sel_name}**")
 
-    import plotly.graph_objects as go
-    fig_prob = go.Figure()
+        hourly_ci = (
+            df_st_op.groupby("hour")["disponible"]
+            .agg(["sum", "count"])
+            .reset_index()
+            .rename(columns={"sum": "exitos", "count": "total"})
+        )
+        hourly_ci["p"]       = hourly_ci["exitos"] / hourly_ci["total"]
+        hourly_ci["ci_low"]  = hourly_ci.apply(lambda r: wilson_ci(r.exitos, r.total)[0], axis=1)
+        hourly_ci["ci_high"] = hourly_ci.apply(lambda r: wilson_ci(r.exitos, r.total)[1], axis=1)
 
-    # Banda IC Wilson: recorre horas 0→23 por arriba y 23→0 por abajo
-    horas_asc  = hourly_ci["hour"].tolist()
-    horas_desc = horas_asc[::-1]
-    ci_high    = hourly_ci["ci_high"].tolist()
-    ci_low     = hourly_ci["ci_low"].tolist()
-    fig_prob.add_trace(go.Scatter(
-        x=horas_asc + horas_desc,
-        y=ci_high + ci_low[::-1],
-        fill="toself", fillcolor="rgba(39,174,96,0.15)",
-        line=dict(color="rgba(0,0,0,0)"),
-        hoverinfo="skip", name="IC 95% (Wilson)",
-    ))
-    # Puntos observados (sin suavizar)
-    fig_prob.add_trace(go.Scatter(
-        x=hourly_ci["hour"], y=hourly_ci["p"],
-        mode="markers", marker=dict(color="#27ae60", size=7, opacity=0.5),
-        name="P observada", hovertemplate="Hora %{x}h: %{y:.0%}<extra></extra>",
-    ))
-    # Curva suavizada
-    fig_prob.add_trace(go.Scatter(
-        x=hourly_ci["hour"], y=hourly_ci["p_smooth"],
-        mode="lines", line=dict(color="#27ae60", width=3),
-        name="Tendencia (LOWESS)", hovertemplate="Hora %{x}h: %{y:.0%}<extra></extra>",
-    ))
-    # Línea de referencia 50%
-    fig_prob.add_hline(
-        y=0.5, line_dash="dot", line_color="#e74c3c", line_width=1.5,
-        annotation_text="50%", annotation_position="top right",
-        annotation_font_color="#e74c3c",
-    )
-    fig_prob.update_layout(
-        margin=dict(t=10, b=5), height=320,
-        yaxis=dict(
-            range=[0, 1], fixedrange=True,
-            tickvals=[0, 0.25, 0.5, 0.75, 1.0],
-            ticktext=["0%", "25%", "50%", "75%", "100%"],
-            title="P(≥1 bici)",
-        ),
-        xaxis=dict(
-            fixedrange=True,
-            tickmode="array",
-            tickvals=[0, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23],
-            title="Hora del día",
-        ),
-        legend=dict(orientation="h", y=1.08),
-    )
-    st.caption(f"Basado en {len(df_st):,} observaciones · banda = IC Wilson 95% · curva = suavizado LOWESS")
-    st.plotly_chart(fig_prob, use_container_width=True)
+        # Suavizado LOWESS sobre los puntos por hora (frac controla cuánto suaviza)
+        smoothed = lowess(hourly_ci["p"], hourly_ci["hour"], frac=0.35, return_sorted=True)
+        hourly_ci["p_smooth"] = np.clip(smoothed[:, 1], 0, 1)
+
+        fig_prob = go.Figure()
+
+        # Banda IC Wilson: recorre horas 0→23 por arriba y 23→0 por abajo
+        horas_asc  = hourly_ci["hour"].tolist()
+        horas_desc = horas_asc[::-1]
+        ci_high    = hourly_ci["ci_high"].tolist()
+        ci_low     = hourly_ci["ci_low"].tolist()
+        fig_prob.add_trace(go.Scatter(
+            x=horas_asc + horas_desc,
+            y=ci_high + ci_low[::-1],
+            fill="toself", fillcolor="rgba(39,174,96,0.15)",
+            line=dict(color="rgba(0,0,0,0)"),
+            hoverinfo="skip", name="IC 95% (Wilson)",
+        ))
+        # Puntos observados (sin suavizar)
+        fig_prob.add_trace(go.Scatter(
+            x=hourly_ci["hour"], y=hourly_ci["p"],
+            mode="markers", marker=dict(color="#27ae60", size=7, opacity=0.5),
+            name="P observada", hovertemplate="Hora %{x}h: %{y:.0%}<extra></extra>",
+        ))
+        # Curva suavizada
+        fig_prob.add_trace(go.Scatter(
+            x=hourly_ci["hour"], y=hourly_ci["p_smooth"],
+            mode="lines", line=dict(color="#27ae60", width=3),
+            name="Tendencia (LOWESS)", hovertemplate="Hora %{x}h: %{y:.0%}<extra></extra>",
+        ))
+        # Línea de referencia 50%
+        fig_prob.add_hline(
+            y=0.5, line_dash="dot", line_color="#e74c3c", line_width=1.5,
+            annotation_text="50%", annotation_position="top right",
+            annotation_font_color="#e74c3c",
+        )
+        fig_prob.update_layout(
+            margin=dict(t=10, b=5), height=320,
+            yaxis=dict(
+                range=[0, 1], fixedrange=True,
+                tickvals=[0, 0.25, 0.5, 0.75, 1.0],
+                ticktext=["0%", "25%", "50%", "75%", "100%"],
+                title="P(≥1 bici)",
+            ),
+            xaxis=dict(
+                fixedrange=True,
+                tickmode="array",
+                tickvals=[0, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23],
+                title="Hora del día",
+            ),
+            legend=dict(orientation="h", y=1.08),
+        )
+        st.caption(f"Basado en {len(df_st):,} observaciones · banda = IC Wilson 95% · curva = suavizado LOWESS")
+        st.plotly_chart(fig_prob, use_container_width=True)
+
+    with tab_day:
+        st.markdown(f"**Curva de probabilidad P(≥1 bici) por día de la semana — {sel_name}**")
+        
+        daily_ci = (
+            df_st_op.groupby("dow")["disponible"]
+            .agg(["sum", "count"])
+            .reset_index()
+            .rename(columns={"sum": "exitos", "count": "total"})
+        )
+        
+        # Asegurar que los 7 días estén presentes
+        all_dows = pd.DataFrame({"dow": range(7)})
+        daily_ci = all_dows.merge(daily_ci, on="dow", how="left").fillna(0)
+        
+        daily_ci["p"]       = daily_ci.apply(lambda r: r.exitos / r.total if r.total > 0 else 0, axis=1)
+        daily_ci["ci_low"]  = daily_ci.apply(lambda r: wilson_ci(r.exitos, r.total)[0], axis=1)
+        daily_ci["ci_high"] = daily_ci.apply(lambda r: wilson_ci(r.exitos, r.total)[1], axis=1)
+
+        fig_prob_day = go.Figure()
+
+        dias_asc  = daily_ci["dow"].tolist()
+        dias_desc = dias_asc[::-1]
+        ci_high_day    = daily_ci["ci_high"].tolist()
+        ci_low_day     = daily_ci["ci_low"].tolist()
+        
+        fig_prob_day.add_trace(go.Scatter(
+            x=dias_asc + dias_desc,
+            y=ci_high_day + ci_low_day[::-1],
+            fill="toself", fillcolor="rgba(39,174,96,0.15)",
+            line=dict(color="rgba(0,0,0,0)"),
+            hoverinfo="skip", name="IC 95% (Wilson)",
+        ))
+        
+        # Helper text for hover
+        hover_dias = [DIAS[int(d)] for d in daily_ci["dow"]]
+        
+        # Curva de probabilidad observada por día
+        fig_prob_day.add_trace(go.Scatter(
+            x=daily_ci["dow"], y=daily_ci["p"],
+            mode="lines+markers", marker=dict(color="#27ae60", size=7),
+            line=dict(color="#27ae60", width=3, shape="spline"),
+            name="P observada", 
+            text=hover_dias,
+            hovertemplate="%{text}: %{y:.0%}<extra></extra>",
+        ))
+        
+        fig_prob_day.add_hline(
+            y=0.5, line_dash="dot", line_color="#e74c3c", line_width=1.5,
+            annotation_text="50%", annotation_position="top right",
+            annotation_font_color="#e74c3c",
+        )
+        fig_prob_day.update_layout(
+            margin=dict(t=10, b=5), height=320,
+            yaxis=dict(
+                range=[0, 1], fixedrange=True,
+                tickvals=[0, 0.25, 0.5, 0.75, 1.0],
+                ticktext=["0%", "25%", "50%", "75%", "100%"],
+                title="P(≥1 bici)",
+            ),
+            xaxis=dict(
+                fixedrange=True,
+                tickmode="array",
+                tickvals=list(range(7)),
+                ticktext=DIAS,
+                title="Día de la semana",
+            ),
+            legend=dict(orientation="h", y=1.08),
+        )
+        st.caption(f"Basado en {len(df_st):,} observaciones · banda = IC Wilson 95%")
+        st.plotly_chart(fig_prob_day, use_container_width=True)
 
 st.divider()
 
