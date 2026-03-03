@@ -81,8 +81,13 @@ def load_workflow_runs() -> list:
         f"https://api.github.com/repos/{GITHUB_REPO}"
         f"/actions/workflows/{WORKFLOW_FILE}/runs?per_page=6"
     )
+    headers = {"Accept": "application/vnd.github+json"}
+    gh_token = st.secrets.get("GITHUB_TOKEN") or os.environ.get("GITHUB_TOKEN", "")
+    if gh_token:
+        headers["Authorization"] = f"Bearer {gh_token}"
+
     try:
-        resp = requests.get(url, timeout=10, headers={"Accept": "application/vnd.github+json"})
+        resp = requests.get(url, timeout=10, headers=headers)
         if resp.status_code == 200:
             return resp.json().get("workflow_runs", [])
     except requests.RequestException:
@@ -157,7 +162,7 @@ if runs:
             delta_color=delta_color,
         )
 else:
-    st.info("No se pudo obtener el estado de GitHub Actions (repo público requerido).")
+    st.info("No se pudo obtener el estado de GitHub Actions (repo público requerido o falta configurar GITHUB_TOKEN en los Secrets de Streamlit).")
 
 # ---------------------------------------------------------------------------
 # Estado del pipeline · Recolecciones por origen
